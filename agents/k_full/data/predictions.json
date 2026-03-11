@@ -1,0 +1,73 @@
+{
+  "date": "2026-03-11",
+  "agent": "K (Claude Code)",
+  "method": "Technical Analysis (RSI/MACD/Bollinger/MA)",
+  "predictions": [
+    {
+      "rank": 1,
+      "ticker": "3481.TW",
+      "name": "群創",
+      "price": 27.55,
+      "score": 0.67,
+      "signals": [
+        "均線完美多頭排列",
+        "MACD 動能轉正",
+        "成交量爆量",
+        "5MA 站上 20MA"
+      ]
+    },
+    {
+      "rank": 2,
+      "ticker": "2357.TW",
+      "name": "華碩",
+      "price": 531.0,
+      "score": 0.635,
+      "signals": [
+        "均線偏多",
+        "MACD 正值且持續上揚",
+        "RSI 中性偏多",
+        "量能放大",
+        "5MA 站上 20MA"
+      ]
+    },
+    {
+      "rank": 3,
+      "ticker": "3034.TW",
+      "name": "聯詠",
+      "price": 384.5,
+      "score": 0.625,
+      "signals": [
+        "均線偏多",
+        "MACD 正值且持續上揚",
+        "RSI 中性偏多",
+        "5MA 上穿 20MA 黃金交叉"
+      ]
+    },
+    {
+      "rank": 4,
+      "ticker": "2395.TW",
+      "name": "研華",
+      "price": 345.5,
+      "score": 0.61,
+      "signals": [
+        "均線完美多頭排列",
+        "MACD 動能轉正",
+        "量能放大",
+        "5MA 站上 20MA"
+      ]
+    },
+    {
+      "rank": 5,
+      "ticker": "2408.TW",
+      "name": "南亞科",
+      "price": 231.0,
+      "score": 0.57,
+      "signals": [
+        "MACD 動能轉正",
+        "RSI 超賣反彈",
+        "量能放大",
+        "股價接近布林下軌"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "date": "2026-03-11",
+  "agent": "G",
+  "method": "基本面評分 + 動量篩選",
+  "predictions": [
+    {
+      "ticker": "2357.TW",
+      "name": "華碩",
+      "price": 572.0,
+      "fund_score": 50,
+      "momentum_score": 45,
+      "total_score": 97.0,
+      "signals": [
+        "短期動能強"
+      ],
+      "analysis_reason": "短期動能強勁",
+      "recommendation_reason": "動能適中，穩健操作"
+    },
+    {
+      "ticker": "2379.TW",
+      "name": "瑞昱",
+      "price": 467.0,
+      "fund_score": 60,
+      "momentum_score": 30,
+      "total_score": 92.0,
+      "signals": [
+        "短期上漲",
+        "成長股"
+      ],
+      "analysis_reason": "成長股，產業前景佳；短期趨勢向上",
+      "recommendation_reason": "動能適中，穩健操作；基本面佳，適合中長線持有"
+    },
+    {
+      "ticker": "2376.TW",
+      "name": "技嘉",
+      "price": 226.0,
+      "fund_score": 60,
+      "momentum_score": 30,
+      "total_score": 92.0,
+      "signals": [
+        "短期上漲",
+        "成長股"
+      ],
+      "analysis_reason": "成長股，產業前景佳；短期趨勢向上",
+      "recommendation_reason": "動能適中，穩健操作；基本面佳，適合中長線持有"
+    },
+    {
+      "ticker": "3034.TW",
+      "name": "聯詠",
+      "price": 385.5,
+      "fund_score": 60,
+      "momentum_score": 30,
+      "total_score": 92.0,
+      "signals": [
+        "短期上漲",
+        "成長股"
+      ],
+      "analysis_reason": "成長股，產業前景佳；短期趨勢向上",
+      "recommendation_reason": "動能適中，穩健操作；基本面佳，適合中長線持有"
+    },
+    {
+      "ticker": "2395.TW",
+      "name": "研華",
+      "price": 352.0,
+      "fund_score": 50,
+      "momentum_score": 35,
+      "total_score": 91.0,
+      "signals": [
+        "短期上漲"
+      ],
+      "analysis_reason": "短期趨勢向上",
+      "recommendation_reason": "動能適中，穩健操作"
+    }
+  ]
+}

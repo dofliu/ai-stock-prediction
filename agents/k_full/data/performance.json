@@ -1,0 +1,42 @@
+{
+  "date": "2026-03-11",
+  "agent": "K (Claude Code)",
+  "results": [
+    {
+      "ticker": "3481.TW",
+      "name": "群創",
+      "predicted": 27.55,
+      "actual_change": -0.9
+    },
+    {
+      "ticker": "2357.TW",
+      "name": "華碩",
+      "predicted": 531.0,
+      "actual_change": 2.71
+    },
+    {
+      "ticker": "3034.TW",
+      "name": "聯詠",
+      "predicted": 384.5,
+      "actual_change": 1.45
+    },
+    {
+      "ticker": "2395.TW",
+      "name": "研華",
+      "predicted": 345.5,
+      "actual_change": -0.43
+    },
+    {
+      "ticker": "2408.TW",
+      "name": "南亞科",
+      "predicted": 231.0,
+      "actual_change": 10.0
+    }
+  ],
+  "summary": {
+    "winners": 4,
+    "losers": 1,
+    "avg_change": 2.57,
+    "best": "2408.TW 南亞科 (+10.00%)"
+  }
+}
