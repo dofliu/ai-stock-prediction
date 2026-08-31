@@ -4,6 +4,7 @@
     ai-stock backtest  walk-forward evaluate one model and trade its forecasts
     ai-stock compare   rank several models over identical folds
     ai-stock simulate  Monte-Carlo and luck-vs-skill test for one model
+    ai-stock screen    rank a universe of symbols, corrected for multiple testing
     ai-stock models    list the available model names
 
 Every command works on synthetic data by default, so the whole pipeline is
@@ -30,11 +31,19 @@ from ai_stock.config import (
 )
 from ai_stock.data.loaders import save_csv
 from ai_stock.models.registry import available_models
-from ai_stock.pipeline import compare_models, load_prices, run_model, run_simulation
+from ai_stock.pipeline import (
+    compare_models,
+    load_prices,
+    load_universe,
+    run_model,
+    run_simulation,
+    screen_universe,
+)
 from ai_stock.reporting.report import format_number, metrics_table
 from ai_stock.reporting.studies import (
     render_backtest_report,
     render_comparison_report,
+    render_screen_report,
     render_simulation_report,
 )
 
@@ -48,9 +57,29 @@ _DEFAULT_COMPARE_MODELS = (
 # --------------------------------------------------------------------------- #
 # Argument plumbing
 # --------------------------------------------------------------------------- #
-def _data_options(parser: argparse.ArgumentParser) -> None:
+def _data_options(parser: argparse.ArgumentParser, *, multi: bool = False) -> None:
     group = parser.add_argument_group("data")
-    group.add_argument("--data", type=Path, help="OHLCV CSV file; omit to use synthetic data")
+    if multi:
+        group.add_argument(
+            "--data",
+            type=Path,
+            nargs="+",
+            metavar="PATH",
+            help="OHLCV CSV files, or directories whose *.csv files are all loaded",
+        )
+        group.add_argument(
+            "--tickers",
+            help="comma-separated symbols to download via yfinance, e.g. MU,2408.TW",
+        )
+        group.add_argument("--period", default="12y", help="history length per ticker")
+        group.add_argument(
+            "--cache-dir",
+            type=Path,
+            default=None,
+            help="write downloads here and reuse them, so the screen can be repeated offline",
+        )
+    else:
+        group.add_argument("--data", type=Path, help="OHLCV CSV file; omit to use synthetic data")
     group.add_argument("--days", type=int, default=2500, help="synthetic trading days")
     group.add_argument("--seed", type=int, default=42, help="synthetic data seed")
     group.add_argument("--start", default="2010-01-04", help="synthetic start date")
@@ -209,6 +238,37 @@ def build_parser() -> argparse.ArgumentParser:
         _output_options,
     ):
         add_options(simulate)
+
+    screen = subparsers.add_parser(
+        "screen", help="rank a universe of symbols by how well one model trades each"
+    )
+    screen.add_argument("--model", default="random_forest", help="model applied to every symbol")
+    screen.add_argument(
+        "--rank-by", default="excess_sharpe", help="metric used to order the ranking"
+    )
+    screen.add_argument(
+        "--permutations",
+        type=int,
+        default=200,
+        help="null draws per symbol for the luck test; 0 skips it",
+    )
+    screen.add_argument(
+        "--alpha", type=float, default=0.05, help="significance level after FDR correction"
+    )
+    screen.add_argument(
+        "--null-method",
+        choices=("rotation", "shuffle"),
+        default="rotation",
+        help="how the null breaks the signal/return alignment",
+    )
+    _data_options(screen, multi=True)
+    for add_options in (
+        _feature_options,
+        _walk_forward_options,
+        _backtest_options,
+        _output_options,
+    ):
+        add_options(screen)
 
     subparsers.add_parser("models", help="list the available model names")
     return parser
@@ -450,6 +510,72 @@ def _command_simulate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_screen(args: argparse.Namespace) -> int:
+    config = _experiment_config(args)
+    tickers = [t.strip() for t in (args.tickers or "").split(",") if t.strip()]
+    if not args.data and not tickers:
+        raise ValueError("screen needs --data and/or --tickers")
+
+    universe = load_universe(
+        data_paths=args.data,
+        tickers=tickers or None,
+        period=args.period,
+        cache_dir=args.cache_dir,
+    )
+    result = screen_universe(
+        universe,
+        args.model,
+        config,
+        rank_by=args.rank_by,
+        permutations=args.permutations,
+        alpha=args.alpha,
+        significance_method=args.null_method,
+    )
+
+    if args.out:
+        _write(args.out / f"screen_{args.model}.md", render_screen_report(result, config))
+        table = result.table()
+        if not table.empty:
+            table.to_csv(args.out / f"screen_{args.model}.csv")
+        _echo(f"wrote report to {args.out / f'screen_{args.model}.md'}", quiet=args.quiet)
+
+    table = result.table()
+    lines = []
+    if not table.empty:
+        lines.append(
+            metrics_table(
+                {entry.symbol: entry.metrics() for entry in result.ranked},
+                keys=(
+                    "ic_fold_mean",
+                    "ic_fold_t",
+                    "directional_accuracy",
+                    "sharpe",
+                    "benchmark_sharpe",
+                    "excess_sharpe",
+                    "annual_turnover",
+                    "p_value",
+                    "q_value",
+                ),
+                label="metric",
+            )
+        )
+    survivors = result.survivors()
+    lines.append(
+        f"\n{result.n_tested} symbol(s) tested · "
+        f"noise alone would flag {format_number(result.expected_false_positives())} · "
+        + (
+            "survivors (beat buy & hold and q <= "
+            f"{args.alpha:g}): {', '.join(e.symbol for e in survivors)}"
+            if survivors
+            else f"no symbol both beat buy & hold and survived q <= {args.alpha:g}"
+        )
+    )
+    for entry in result.failures:
+        lines.append(f"skipped {entry.symbol}: {(entry.error or '').splitlines()[0]}")
+    _echo("\n".join(lines), quiet=args.quiet)
+    return 0
+
+
 def _command_models(args: argparse.Namespace) -> int:
     del args
     print("\n".join(available_models()))
@@ -461,6 +587,7 @@ _COMMANDS = {
     "backtest": _command_backtest,
     "compare": _command_compare,
     "simulate": _command_simulate,
+    "screen": _command_screen,
     "models": _command_models,
 }
 

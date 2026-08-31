@@ -6,15 +6,22 @@ do is equally available from a notebook or a test.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from ai_stock.backtest.engine import BacktestResult, run_backtest
 from ai_stock.config import ExperimentConfig, SimulationConfig, SyntheticConfig
-from ai_stock.data.loaders import load_csv
+from ai_stock.data.loaders import load_csv, load_yfinance, save_csv
 from ai_stock.data.synthetic import generate_ohlcv
+from ai_stock.evaluation.multiple_testing import (
+    benjamini_hochberg,
+    bonferroni_threshold,
+    expected_false_positives,
+)
 from ai_stock.evaluation.walkforward import WalkForwardResult, run_walk_forward
 from ai_stock.features.builder import Dataset, build_dataset
 from ai_stock.simulation.monte_carlo import (
@@ -28,11 +35,15 @@ from ai_stock.simulation.monte_carlo import (
 
 __all__ = [
     "ModelRun",
+    "ScreenEntry",
+    "ScreenResult",
     "SimulationBundle",
     "compare_models",
     "load_prices",
+    "load_universe",
     "run_model",
     "run_simulation",
+    "screen_universe",
 ]
 
 
@@ -124,6 +135,252 @@ def compare_models(
         return float("-inf") if pd.isna(value) else float(value)
 
     return sorted(runs, key=key, reverse=True)
+
+
+@dataclass(frozen=True)
+class ScreenEntry:
+    """One symbol's result inside a screen, or the reason it has none."""
+
+    symbol: str
+    n_bars: int
+    run: ModelRun | None = None
+    significance: SignificanceResult | None = None
+    q_value: float = float("nan")
+    """Benjamini-Hochberg adjusted p-value across the whole screen."""
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.run is not None
+
+    @property
+    def p_value(self) -> float:
+        return self.significance.p_value if self.significance else float("nan")
+
+    def metrics(self) -> dict[str, float]:
+        """Flat metrics for the ranking table; empty when the symbol failed."""
+        if self.run is None:
+            return {}
+        merged = dict(self.run.metrics())
+        merged["p_value"] = self.p_value
+        merged["q_value"] = self.q_value
+        merged["n_bars"] = float(self.n_bars)
+        return merged
+
+
+@dataclass(frozen=True)
+class ScreenResult:
+    """A universe screened with one model, ranked by one metric."""
+
+    entries: list[ScreenEntry]
+    model_name: str
+    rank_by: str
+    alpha: float = 0.05
+    config: ExperimentConfig = field(default_factory=ExperimentConfig)
+
+    @property
+    def ranked(self) -> list[ScreenEntry]:
+        """Symbols that produced a result, best first."""
+        return [entry for entry in self.entries if entry.ok]
+
+    @property
+    def failures(self) -> list[ScreenEntry]:
+        return [entry for entry in self.entries if not entry.ok]
+
+    @property
+    def n_tested(self) -> int:
+        return len(self.ranked)
+
+    def bonferroni(self) -> float:
+        """Per-symbol p-value needed for family-wise significance."""
+        return bonferroni_threshold(max(1, self.n_tested), self.alpha)
+
+    def expected_false_positives(self) -> float:
+        """How many symbols pure noise would flag at ``alpha``."""
+        return expected_false_positives(max(1, self.n_tested), self.alpha)
+
+    def survivors(self) -> list[ScreenEntry]:
+        """Symbols that beat buy-and-hold *and* survive the FDR correction.
+
+        Both conditions matter: an edge that loses to holding the stock is not
+        worth trading, and one that only looks real because it was the best of
+        many is not an edge at all.
+        """
+        return [
+            entry
+            for entry in self.ranked
+            if entry.metrics().get("excess_sharpe", float("-inf")) > 0
+            and np.isfinite(entry.q_value)
+            and entry.q_value <= self.alpha
+        ]
+
+    def table(self) -> pd.DataFrame:
+        """Ranking table, one row per symbol that produced a result."""
+        rows = []
+        for entry in self.ranked:
+            metrics = entry.metrics()
+            rows.append(
+                {
+                    "symbol": entry.symbol,
+                    "n_bars": entry.n_bars,
+                    "ic_fold_mean": metrics.get("ic_fold_mean"),
+                    "ic_fold_t": metrics.get("ic_fold_t"),
+                    "directional_accuracy": metrics.get("directional_accuracy"),
+                    "sharpe": metrics.get("sharpe"),
+                    "benchmark_sharpe": metrics.get("benchmark_sharpe"),
+                    "excess_sharpe": metrics.get("excess_sharpe"),
+                    "annualised_return": metrics.get("annualised_return"),
+                    "max_drawdown": metrics.get("max_drawdown"),
+                    "annual_turnover": metrics.get("annual_turnover"),
+                    "p_value": entry.p_value,
+                    "q_value": entry.q_value,
+                }
+            )
+        frame = pd.DataFrame(rows)
+        return frame.set_index("symbol") if not frame.empty else frame
+
+
+def _expand_data_paths(paths: Sequence[Path | str]) -> list[Path]:
+    """Expand directories to the CSV files inside them, keeping order."""
+    expanded: list[Path] = []
+    for raw in paths:
+        path = Path(raw)
+        if path.is_dir():
+            expanded.extend(sorted(path.glob("*.csv")))
+        else:
+            expanded.append(path)
+    return expanded
+
+
+def load_universe(
+    *,
+    data_paths: Sequence[Path | str] | None = None,
+    tickers: Sequence[str] | None = None,
+    period: str = "12y",
+    cache_dir: Path | str | None = None,
+    loader: Callable[[str], pd.DataFrame] | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Collect a symbol -> OHLCV mapping from CSV files and/or live tickers.
+
+    Parameters
+    ----------
+    data_paths:
+        CSV files, or directories whose ``*.csv`` files are all loaded. The
+        symbol is the file stem.
+    tickers:
+        Symbols to download through :func:`ai_stock.data.load_yfinance`, which
+        needs network access and the optional ``yfinance`` package.
+    period:
+        History length requested per ticker.
+    cache_dir:
+        When set, a downloaded ticker is written here and reused on the next
+        run, so a screen can be repeated offline.
+    loader:
+        Overrides the download function; used by the tests, and handy for
+        plugging in another data vendor.
+
+    Raises
+    ------
+    ValueError
+        If neither source is given, or two sources claim the same symbol.
+    """
+    if not data_paths and not tickers:
+        raise ValueError("provide data_paths, tickers, or both")
+
+    universe: dict[str, pd.DataFrame] = {}
+
+    for path in _expand_data_paths(data_paths or []):
+        symbol = path.stem
+        if symbol in universe:
+            raise ValueError(f"duplicate symbol {symbol!r} in the universe")
+        universe[symbol] = load_csv(path)
+
+    if tickers:
+        download = loader or (lambda t: load_yfinance(t, period=period))
+        cache = Path(cache_dir) if cache_dir else None
+        for ticker in tickers:
+            if ticker in universe:
+                raise ValueError(f"duplicate symbol {ticker!r} in the universe")
+            cached = cache / f"{ticker.replace('/', '_')}.csv" if cache else None
+            if cached is not None and cached.exists():
+                universe[ticker] = load_csv(cached)
+                continue
+            frame = download(ticker)
+            if cached is not None:
+                save_csv(frame, cached)
+            universe[ticker] = frame
+
+    return universe
+
+
+def screen_universe(
+    universe: Mapping[str, pd.DataFrame],
+    model_name: str = "random_forest",
+    config: ExperimentConfig | None = None,
+    *,
+    rank_by: str = "excess_sharpe",
+    permutations: int = 200,
+    alpha: float = 0.05,
+    significance_method: str = "rotation",
+) -> ScreenResult:
+    """Run the same study on every symbol and rank them.
+
+    Every symbol gets its own walk-forward, backtest and null test, so the
+    comparison is like for like. A symbol that cannot be evaluated - too few
+    bars, bad data - records the reason and does not abort the screen.
+
+    Because ranking many symbols by the same statistic is exactly how false
+    positives are manufactured, p-values are adjusted across the screen with
+    Benjamini-Hochberg and exposed as ``q_value``.
+
+    Parameters
+    ----------
+    universe:
+        Symbol -> OHLCV frames, e.g. from :func:`load_universe`.
+    permutations:
+        Null draws per symbol; ``0`` skips the significance test, which also
+        skips the correction.
+    """
+    if not universe:
+        raise ValueError("the universe is empty")
+    config = config or ExperimentConfig()
+
+    raw: list[ScreenEntry] = []
+    for symbol, ohlcv in universe.items():
+        n_bars = len(ohlcv)
+        try:
+            run = run_model(ohlcv, model_name, config)
+            significance = None
+            if permutations > 0:
+                significance = significance_test(
+                    run.walk_forward.close,
+                    run.walk_forward.predictions,
+                    backtest_config=config.backtest,
+                    simulation_config=replace(config.simulation, n_permutations=permutations),
+                    method=significance_method,
+                )
+            raw.append(
+                ScreenEntry(symbol=symbol, n_bars=n_bars, run=run, significance=significance)
+            )
+        except (ValueError, KeyError, RuntimeError) as error:
+            raw.append(ScreenEntry(symbol=symbol, n_bars=n_bars, error=str(error)))
+
+    q_values = benjamini_hochberg([entry.p_value for entry in raw])
+    scored = [replace(entry, q_value=float(q)) for entry, q in zip(raw, q_values, strict=True)]
+
+    def sort_key(entry: ScreenEntry) -> float:
+        value = entry.metrics().get(rank_by, float("nan"))
+        return float("-inf") if value is None or pd.isna(value) else float(value)
+
+    ok = sorted([e for e in scored if e.ok], key=sort_key, reverse=True)
+    failed = [e for e in scored if not e.ok]
+    return ScreenResult(
+        entries=[*ok, *failed],
+        model_name=model_name,
+        rank_by=rank_by,
+        alpha=alpha,
+        config=config,
+    )
 
 
 def run_simulation(

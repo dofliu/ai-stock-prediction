@@ -1,4 +1,4 @@
-"""Evaluation: walk-forward validation and performance metrics."""
+"""Evaluation: walk-forward validation, metrics and multiple-testing controls."""
 
 from ai_stock.evaluation.metrics import (
     annualised_return,
@@ -12,6 +12,11 @@ from ai_stock.evaluation.metrics import (
     regression_metrics,
     sharpe_ratio,
     sortino_ratio,
+)
+from ai_stock.evaluation.multiple_testing import (
+    benjamini_hochberg,
+    bonferroni_threshold,
+    expected_false_positives,
 )
 from ai_stock.evaluation.walkforward import (
     Fold,
@@ -28,8 +33,11 @@ __all__ = [
     "WalkForwardSplitter",
     "annualised_return",
     "annualised_volatility",
+    "benjamini_hochberg",
+    "bonferroni_threshold",
     "calmar_ratio",
     "classification_metrics",
+    "expected_false_positives",
     "financial_metrics",
     "information_coefficient",
     "max_drawdown",

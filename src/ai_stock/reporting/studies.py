@@ -9,18 +9,21 @@ from __future__ import annotations
 import pandas as pd
 
 from ai_stock.config import ExperimentConfig
-from ai_stock.pipeline import ModelRun, SimulationBundle
+from ai_stock.pipeline import ModelRun, ScreenResult, SimulationBundle
 from ai_stock.reporting.report import (
     Report,
+    ascii_bars,
     ascii_histogram,
     ascii_line_chart,
     format_number,
+    markdown_table,
     metrics_table,
 )
 
 __all__ = [
     "render_backtest_report",
     "render_comparison_report",
+    "render_screen_report",
     "render_simulation_report",
     "summarise_run_row",
 ]
@@ -355,4 +358,157 @@ def render_simulation_report(bundle: SimulationBundle, config: ExperimentConfig)
         ]
     )
     report.heading("Caveats").bullets(_caveats())
+    return report.render()
+
+
+_SCREEN_COLUMNS: tuple[tuple[str, str, bool], ...] = (
+    ("n_bars", "bars", False),
+    ("ic_fold_mean", "fold IC", False),
+    ("ic_fold_t", "IC t-stat", False),
+    ("directional_accuracy", "dir. acc.", True),
+    ("sharpe", "Sharpe", False),
+    ("benchmark_sharpe", "B&H Sharpe", False),
+    ("excess_sharpe", "vs B&H", False),
+    ("annualised_return", "ann. return", True),
+    ("max_drawdown", "max DD", True),
+    ("annual_turnover", "turnover", False),
+    ("p_value", "p", False),
+    ("q_value", "q (FDR)", False),
+)
+
+
+def render_screen_report(result: ScreenResult, config: ExperimentConfig) -> str:
+    """Rank a universe by how well one model trades each symbol.
+
+    The report leads with the multiple-comparison correction rather than
+    burying it: the whole point of a screen is that the winner was selected
+    from many candidates, which is also how a fake edge is manufactured.
+    """
+    ranked = result.ranked
+    if not ranked and not result.failures:
+        raise ValueError("no symbols to report")
+
+    report = Report(
+        f"Universe screen: `{result.model_name}`",
+        subtitle="Same features, same folds, same costs on every symbol - then ranked.",
+    )
+
+    survivors = result.survivors()
+    if survivors:
+        names = ", ".join(f"`{entry.symbol}`" for entry in survivors)
+        verdict = (
+            f"**{len(survivors)} of {result.n_tested} symbols** beat buy-and-hold *and* "
+            f"survive the FDR correction at q <= {result.alpha:g}: {names}."
+        )
+    elif ranked:
+        verdict = (
+            f"**No symbol** both beat buy-and-hold and survived the FDR correction at "
+            f"q <= {result.alpha:g}. On this universe, holding the shares was the better "
+            "of the two available choices everywhere."
+        )
+    else:
+        verdict = "**No symbol produced a result.** See the failures below."
+    report.text(verdict)
+
+    if ranked:
+        span_start = min(entry.run.walk_forward.predictions.index[0] for entry in ranked)
+        span_end = max(entry.run.walk_forward.predictions.index[-1] for entry in ranked)
+        span = (str(span_start.date()), str(span_end.date()))
+        bars = max(len(entry.run.walk_forward.predictions) for entry in ranked)
+    else:
+        span, bars = ("n/a", "n/a"), 0
+
+    report.heading("Setup").bullets(
+        [
+            f"Universe: {len(result.entries)} symbol(s), {result.n_tested} evaluated",
+            f"Model: `{result.model_name}`, ranked by `{result.rank_by}`",
+            *_setup_bullets(config, span, bars)[1:],
+        ]
+    )
+
+    report.heading("Ranking")
+    headers = ["symbol", *(header for _, header, _ in _SCREEN_COLUMNS)]
+    rows = []
+    for entry in ranked:
+        metrics = entry.metrics()
+        cells = []
+        for key, _, percent in _SCREEN_COLUMNS:
+            value = metrics.get(key)
+            # A bar count is a count, not a measurement: render it as one.
+            cells.append(
+                f"{int(value):,}"
+                if key == "n_bars" and value is not None and not pd.isna(value)
+                else format_number(value, percent=percent)
+            )
+        rows.append([entry.symbol, *cells])
+    report.table(headers, rows)
+
+    if ranked:
+        report.heading("Excess Sharpe vs buy-and-hold")
+        report.code_block(
+            ascii_bars(
+                [entry.symbol for entry in ranked],
+                [entry.metrics().get("excess_sharpe", float("nan")) for entry in ranked],
+                width=48,
+            )
+        )
+
+    report.heading("The multiple-comparison correction")
+    report.raw_table(
+        markdown_table(
+            ["quantity", "value"],
+            [
+                ["symbols tested", str(result.n_tested)],
+                ["alpha", format_number(result.alpha)],
+                ["Bonferroni threshold (per symbol)", format_number(result.bonferroni())],
+                [
+                    "false positives expected from noise alone",
+                    format_number(result.expected_false_positives()),
+                ],
+                [
+                    "symbols with raw p <= alpha",
+                    str(sum(e.p_value <= result.alpha for e in ranked)),
+                ],
+                ["symbols with q <= alpha", str(sum(e.q_value <= result.alpha for e in ranked))],
+            ],
+        )
+    )
+    report.bullets(
+        [
+            "`p` is the raw one-sided permutation p-value for that symbol on its own.",
+            "`q` is the same test adjusted across the screen (Benjamini-Hochberg). "
+            "A q of 0.10 means roughly a tenth of everything you accept at that level "
+            "is noise.",
+            "Read `q`, not `p`. Ranking N symbols and quoting the winner's raw p-value "
+            "is the arithmetic that produces most published trading edges.",
+        ]
+    )
+
+    if result.failures:
+        report.heading("Symbols that could not be evaluated")
+        report.table(
+            ["symbol", "bars", "reason"],
+            [
+                [e.symbol, str(e.n_bars), (e.error or "").split("\n")[0][:110]]
+                for e in result.failures
+            ],
+        )
+
+    report.heading("How to read this").bullets(
+        [
+            "**Start at `vs B&H`.** A negative value means the model lost to simply "
+            "holding that stock; nothing else in the row can rescue it.",
+            "**Then `q`.** A symbol clearing both is a candidate for further work, not a "
+            "signal to trade.",
+            *_reading_notes()[:2],
+        ]
+    )
+    report.heading("Caveats").bullets(
+        [
+            "Screening the same universe repeatedly with different models or windows "
+            "multiplies the selection problem again, and the FDR correction here only "
+            "covers the symbols in this one run.",
+            *_caveats(),
+        ]
+    )
     return report.render()
