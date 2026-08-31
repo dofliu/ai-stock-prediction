@@ -284,6 +284,19 @@ def _model_names(raw: str) -> list[str]:
     return names
 
 
+def _horizon_label(days: int) -> str:
+    """Human-readable span for a simulation horizon in trading days.
+
+    >>> _horizon_label(5), _horizon_label(21), _horizon_label(252)
+    ('1w', '1mo', '1y')
+    """
+    for length, label in ((252, "y"), (21, "mo"), (5, "w")):
+        if days % length == 0:
+            count = days // length
+            return f"{count}{label}"
+    return f"{days}d"
+
+
 def _write(path: Path, content: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -412,6 +425,9 @@ def _command_simulate(args: argparse.Namespace) -> int:
     significance = bundle.significance
     forward = bundle.forward_paths.summary()
     ci_low, ci_high = bundle.sharpe_bootstrap.confidence_interval
+    # Label the projection with the horizon actually simulated: calling a
+    # 5-day figure "1y" invites a reader to act on a number 50x too small.
+    span = _horizon_label(bundle.forward_paths.config.horizon_days)
     _echo(
         "\n".join(
             [
@@ -421,11 +437,12 @@ def _command_simulate(args: argparse.Namespace) -> int:
                 f"95th pct {format_number(significance.summary()['null_q95'])}",
                 f"p-value            {format_number(significance.p_value)}",
                 f"Sharpe 90% CI      [{format_number(ci_low)}, {format_number(ci_high)}]",
-                f"1y median return   "
-                f"{format_number(forward['median_terminal_return'], percent=True)}",
-                f"1y 5% quantile     {format_number(forward['terminal_return_q05'], percent=True)}",
-                f"prob. of loss      "
-                f"{format_number(bundle.forward_paths.probability_of_loss, percent=True)}",
+                f"{span} median return".ljust(19)
+                + f"{format_number(forward['median_terminal_return'], percent=True)}",
+                f"{span} 5% quantile".ljust(19)
+                + f"{format_number(forward['terminal_return_q05'], percent=True)}",
+                f"{span} prob. of loss".ljust(19)
+                + f"{format_number(bundle.forward_paths.probability_of_loss, percent=True)}",
             ]
         ),
         quiet=args.quiet,
