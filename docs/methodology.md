@@ -178,6 +178,32 @@ $$
 
 ---
 
+## 6b. 篩選族群時的多重檢定
+
+`ai_stock/evaluation/multiple_testing.py`
+
+對 $m$ 檔各做一次 5% 門檻的檢定，即使沒有任何一檔真的有邊際，
+預期仍會有 $0.05m$ 檔被標記為「顯著」。把族群排序後只報最好的那檔的原始 p 值，
+是製造假邊際最常見的算術。
+
+`screen` 因此用 **Benjamini–Hochberg** 把 p 值轉成 q 值（控制 FDR）：
+將 $p_{(1)} \le \cdots \le p_{(m)}$ 排序後
+
+$$
+q_{(i)} = \min_{j \ge i} \left( \frac{m}{j} p_{(j)} \right),\qquad q_{(i)} \le 1
+$$
+
+$q = 0.10$ 的意思是：若接受所有強度到此為止的結果，其中約一成是雜訊。
+選 BH 而非 Bonferroni，是因為族群篩選的情境下通常確實存在少數真實邊際，
+Bonferroni 過於保守會把它們一起濾掉；報告仍同時列出 Bonferroni 門檻 $\alpha/m$ 作為對照。
+
+檢定失敗（資料太短等）的標的其 p 值為 `NaN`，會被排除在校正之外，
+不會膨脹其他標的的 q 值。
+
+**判讀順序**：先看 `excess_sharpe`（贏不過買進持有就到此為止），再看 `q`，最後才看 IC。
+
+---
+
 ## 7. Bootstrap 與 Probabilistic Sharpe
 
 **區塊 bootstrap**（預設 `block_size=20`）以環狀方式抽取連續區塊，
@@ -206,6 +232,8 @@ $$
 4. **重疊訊號**：$h > 1$ 時每天以最新預測更新部位，屬慣例作法，但會使有效樣本數
    小於 bar 數；`ic_fold_t` 的自由度因此偏樂觀。
 5. **合成 ≠ 真實**：能還原植入的邊際只證明管線正確，不代表真實市場存在該邊際。
+6. **FDR 校正只涵蓋單次篩選**：用不同模型或不同視窗把同一族群反覆篩過，
+   選擇偏誤會再乘一次，而 `q` 值並不知道你跑過幾輪。
 
 ---
 
@@ -213,5 +241,6 @@ $$
 
 - Bailey, D. & López de Prado, M. (2012). *The Sharpe Ratio Efficient Frontier.*
 - López de Prado, M. (2018). *Advances in Financial Machine Learning.*（purging / embargo）
+- Benjamini, Y. & Hochberg, Y. (1995). *Controlling the False Discovery Rate.*
 - Politis, D. & Romano, J. (1994). *The Stationary Bootstrap.*
 - Bollerslev, T. (1986). *Generalized Autoregressive Conditional Heteroskedasticity.*

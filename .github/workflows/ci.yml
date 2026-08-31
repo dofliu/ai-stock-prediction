@@ -51,5 +51,10 @@ jobs:
             --train-size 400 --test-size 100 --out reports
           ai-stock simulate --data data/ci.csv --model ridge --paths 100 \
             --permutations 50 --train-size 400 --test-size 100 --out reports
+          ai-stock data --days 800 --seed 2 --out data/universe/BBB.csv
+          cp data/ci.csv data/universe/AAA.csv
+          ai-stock screen --data data/universe --model ridge --permutations 20 \
+            --train-size 400 --test-size 100 --out reports
           test -s reports/comparison.md
           test -s reports/simulation_ridge.md
+          test -s reports/screen_ridge.md

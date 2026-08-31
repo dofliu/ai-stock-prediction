@@ -23,6 +23,7 @@
 | 沒有對照組 | 每次比較都包含 `zero`、`train_mean`、`momentum`、`reversion` 等基準與 buy & hold |
 | 單一數字當結論 | 提供逐 fold 指標、bootstrap 信賴區間，以及排列檢定的 p 值 |
 | 分不清運氣與技巧 | **循環位移（rotation）虛無假設**：保留訊號自相關與換手率，只破壞時序對齊 |
+| 篩一整個族群後只報最好的那檔 | **Benjamini–Hochberg FDR 校正**：`screen` 同時輸出原始 p 與跨標的校正後的 q 值 |
 
 ### 兩個容易被忽略的細節
 
@@ -31,7 +32,12 @@ regime 之間的均值差異；實測中曾出現「六成 fold 的 IC 為正，
 ——典型的辛普森悖論。因此本框架同時輸出 `ic_fold_mean`、`ic_fold_t`
 （跨 fold 的 t 統計量），並以**逐 fold 指標為準**。
 
-**2. 洗牌（shuffle）的虛無假設對策略太仁慈。** 隨機打亂訊號會摧毀它的自相關，
+**2. 篩越多檔，越容易撞到假訊號。** 同時測 10 檔、每檔用 5% 門檻，就算沒有任何一檔真的有邊際，
+平均也會有 0.5 檔「顯著」。`screen` 因此把原始 p 值與 BH 校正後的 q 值並列，並直接寫出
+「純雜訊預期會標記幾檔」。實測中曾出現某檔原始 p = 0.0498（剛好低於 0.05），
+校正後 q = 0.0997——同時篩四檔就是這個代價。
+
+**3. 洗牌（shuffle）的虛無假設對策略太仁慈。** 隨機打亂訊號會摧毀它的自相關，
 使虛無策略的換手率暴增、成本大增，於是門檻被壓低。改用**循環位移**保留換手率，
 只破壞「訊號與未來報酬的對齊」，才是公平的對照。實測中 rotation 虛無分布的
 95 百分位是 0.40，而 shuffle 只有 0.13——差距就是這個偏誤的大小。
@@ -64,9 +70,31 @@ ai-stock compare --data data/synthetic.csv --out reports
 
 # 4. 蒙地卡羅模擬 + 顯著性檢定
 ai-stock simulate --data data/synthetic.csv --model ridge --paths 1000 --out reports
+
+# 5. 一次篩選一整個族群，並校正多重檢定
+ai-stock screen --tickers MU,2408.TW,2344.TW,2337.TW --model random_forest \
+    --horizon 5 --permutations 300 --cache-dir data/cache --out reports
 ```
 
 或直接用 `make demo` 一次跑完。若未安裝套件，`python -m ai_stock ...` 等價於 `ai-stock ...`。
+
+### 族群篩選輸出範例
+
+```
+| metric               | DRAM_PUREPLAY | DRAM_MAJOR | NOR_FLASH | NICHE_MEM |
+|----------------------|---------------|------------|-----------|-----------|
+| ic_fold_t            | 5.5899        | 1.8553     | 1.4483    | 0.8279    |
+| sharpe               | 0.8748        | 0.7547     | 0.2568    | 0.5671    |
+| benchmark_sharpe     | 0.4998        | 0.6619     | 0.4242    | 0.9853    |
+| excess_sharpe        | 0.3750        | 0.0929     | -0.1674   | -0.4182   |
+| p_value              | 0.0100        | 0.0498     | 0.2525    | 0.4020    |
+| q_value              | 0.0399        | 0.0997     | 0.3367    | 0.4020    |
+
+4 symbol(s) tested · noise alone would flag 0.2000 · survivors: DRAM_PUREPLAY
+```
+
+判讀順序：**先看 `excess_sharpe`**（負的就不用往下看了，你贏不過買進持有），
+**再看 `q_value`**（不是 `p_value`），最後才是 IC 與準確率。
 
 ### 輸出範例
 
@@ -109,7 +137,7 @@ ai-stock simulate --model ridge --days 3000 --efficient    # 無邊際（純雜�
 src/ai_stock/
 ├── config.py            # 所有階段共用的 frozen dataclass 設定
 ├── pipeline.py          # 端到端流程（CLI 只是它的薄殼）
-├── cli.py               # data / backtest / compare / simulate / models
+├── cli.py               # data / backtest / compare / simulate / screen / models
 ├── data/
 │   ├── synthetic.py     # regime 切換 + GARCH 波動叢聚 + 厚尾 + 已知邊際
 │   └── loaders.py       # CSV 載入、OHLCV 驗證、yfinance（選用）
@@ -122,6 +150,7 @@ src/ai_stock/
 │   └── registry.py      # 以名稱建立模型，可註冊自訂模型
 ├── evaluation/
 │   ├── walkforward.py   # 帶 embargo 的滾動/擴張視窗
+│   ├── multiple_testing.py # BH FDR、Bonferroni、預期偽陽性數
 │   └── metrics.py       # 迴歸/分類/財務指標、Probabilistic Sharpe
 ├── backtest/engine.py   # 訊號→部位→權益曲線（含成本、波動目標）
 ├── simulation/          # 路徑模擬、bootstrap 區間、排列檢定

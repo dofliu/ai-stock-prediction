@@ -205,6 +205,91 @@ def test_rolling_window_and_horizon_options_are_accepted() -> None:
     )
 
 
+def test_screen_command_ranks_a_directory_of_csvs(tmp_path: Path, capsys) -> None:
+    from dataclasses import replace as _replace
+
+    from ai_stock.config import SyntheticConfig
+    from ai_stock.data.loaders import save_csv
+    from ai_stock.data.synthetic import generate_ohlcv
+
+    folder = tmp_path / "universe"
+    base = SyntheticConfig(n_days=700, seed=5)
+    for symbol, seed in (("AAA", 11), ("BBB", 22)):
+        save_csv(generate_ohlcv(_replace(base, seed=seed)), folder / f"{symbol}.csv")
+
+    out = tmp_path / "reports"
+    assert (
+        main(
+            [
+                "screen",
+                "--data",
+                str(folder),
+                "--model",
+                "ridge",
+                "--permutations",
+                "20",
+                "--train-size",
+                "400",
+                "--test-size",
+                "100",
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+
+    report = out / "screen_ridge.md"
+    assert report.exists() and report.read_text().startswith("# Universe screen")
+    table = pd.read_csv(out / "screen_ridge.csv", index_col="symbol")
+    assert set(table.index) == {"AAA", "BBB"}
+    assert {"excess_sharpe", "p_value", "q_value"} <= set(table.columns)
+
+    output = capsys.readouterr().out
+    assert "symbol(s) tested" in output
+    assert "noise alone would flag" in output
+
+
+def test_screen_command_accepts_tickers_via_the_loader(tmp_path: Path, monkeypatch) -> None:
+    """The --tickers path is exercised without touching the network."""
+    from ai_stock.data.synthetic import generate_ohlcv
+
+    frame = generate_ohlcv(n_days=700, seed=3)
+    monkeypatch.setattr("ai_stock.pipeline.load_yfinance", lambda t, period="12y": frame)
+
+    cache = tmp_path / "cache"
+    assert (
+        main(
+            [
+                "screen",
+                "--tickers",
+                "MU,2408.TW",
+                "--cache-dir",
+                str(cache),
+                "--model",
+                "ridge",
+                "--permutations",
+                "0",
+                "--train-size",
+                "400",
+                "--test-size",
+                "100",
+                "--quiet",
+            ]
+        )
+        == 0
+    )
+    assert (cache / "MU.csv").exists()
+    assert (cache / "2408.TW.csv").exists()
+
+
+def test_screen_without_a_source_exits_with_code_two(capsys) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["screen", "--model", "ridge"])
+    assert excinfo.value.code == 2
+    assert "--data and/or --tickers" in capsys.readouterr().err
+
+
 def test_unknown_model_exits_with_code_two(capsys) -> None:
     with pytest.raises(SystemExit) as excinfo:
         main(["compare", "--models", "not_a_model", *SMALL])

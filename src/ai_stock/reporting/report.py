@@ -15,6 +15,7 @@ import pandas as pd
 
 __all__ = [
     "Report",
+    "ascii_bars",
     "ascii_histogram",
     "ascii_line_chart",
     "format_number",
@@ -260,6 +261,48 @@ def ascii_histogram(
             lines.append(f"{'':8} | {'':<{width}} {'':>5}  <== {marker_label} above the null range")
         elif marker < edges[0]:
             lines.append(f"{'':8} | {'':<{width}} {'':>5}  <== {marker_label} below the null range")
+    return "\n".join(lines)
+
+
+def ascii_bars(
+    labels: Sequence[str],
+    values: Sequence[float],
+    *,
+    width: int = 40,
+    unit: str = "",
+) -> str:
+    """Horizontal bars for signed values, drawn either side of a zero axis.
+
+    Used to compare one metric across a universe of symbols, where the sign is
+    the headline: bars left of the axis are the names that lost to the
+    benchmark.
+    """
+    if len(labels) != len(values):
+        raise ValueError(f"labels and values differ in length: {len(labels)} vs {len(values)}")
+    if not labels:
+        return "_no data_"
+
+    numbers = [float(v) if v is not None and not math.isnan(float(v)) else math.nan for v in values]
+    finite = [v for v in numbers if not math.isnan(v)]
+    if not finite:
+        return "_no data_"
+
+    span = max(abs(min(finite)), abs(max(finite))) or 1.0
+    half = max(4, width // 2)
+    label_width = max(len(str(label)) for label in labels)
+
+    lines = []
+    for label, value in zip(labels, numbers, strict=True):
+        name = str(label).ljust(label_width)
+        if math.isnan(value):
+            lines.append(f"{name} {' ' * half}|{' ' * half}  n/a")
+            continue
+        cells = int(round(abs(value) / span * half))
+        if value >= 0:
+            bar = " " * half + "|" + ("#" * cells).ljust(half)
+        else:
+            bar = (" " * (half - cells) + "#" * cells).rjust(half) + "|" + " " * half
+        lines.append(f"{name} {bar}  {value:+.3f}{unit}")
     return "\n".join(lines)
 
 
