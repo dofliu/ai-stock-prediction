@@ -17,7 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4", "ruff>=0.4"]
+# ruff is upper-bounded because CI runs `ruff format --check`, which a new
+# formatter release can fail without any change to this repository.
+dev = ["pytest>=7.4", "ruff>=0.15,<0.17"]
 plot = ["matplotlib>=3.7"]
 
 [project.scripts]

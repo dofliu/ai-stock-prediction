@@ -43,7 +43,9 @@ def validate_ohlcv(frame: pd.DataFrame, *, name: str = "data") -> pd.DataFrame:
         raise ValueError(f"{name} is missing required column(s): {', '.join(missing)}")
 
     if not isinstance(frame.index, pd.DatetimeIndex):
-        raise TypeError(f"{name} must be indexed by a DatetimeIndex, got {type(frame.index).__name__}")
+        raise TypeError(
+            f"{name} must be indexed by a DatetimeIndex, got {type(frame.index).__name__}"
+        )
     if frame.index.has_duplicates:
         duplicates = frame.index[frame.index.duplicated()].unique()[:3]
         raise ValueError(f"{name} has duplicate timestamps, e.g. {list(duplicates)}")
@@ -64,7 +66,9 @@ def validate_ohlcv(frame: pd.DataFrame, *, name: str = "data") -> pd.DataFrame:
     body_low = frame[["open", "close"]].min(axis=1)
     if (frame["high"] < body_high).any() or (frame["low"] > body_low).any():
         bad = frame.index[(frame["high"] < body_high) | (frame["low"] > body_low)][:3]
-        raise ValueError(f"{name} has inconsistent bars (high/low outside open/close), e.g. {list(bad)}")
+        raise ValueError(
+            f"{name} has inconsistent bars (high/low outside open/close), e.g. {list(bad)}"
+        )
     return frame
 
 

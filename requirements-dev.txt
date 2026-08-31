@@ -1,3 +1,4 @@
 -r requirements.txt
 pytest>=7.4
-ruff>=0.4
+# Upper-bounded: `ruff format --check` output can change between minor releases.
+ruff>=0.15,<0.17
