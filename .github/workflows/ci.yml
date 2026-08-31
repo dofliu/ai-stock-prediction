@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: |
+          ruff check src tests
+          ruff format --check src tests
+
+      - name: Test
+        run: pytest -q
+
+      - name: Doctests
+        run: pytest --doctest-modules src/ai_stock -q
+
+      - name: Smoke-test the CLI end to end
+        run: |
+          ai-stock data --days 800 --seed 1 --out data/ci.csv
+          ai-stock compare --data data/ci.csv --models zero,momentum,ridge \
+            --train-size 400 --test-size 100 --out reports
+          ai-stock simulate --data data/ci.csv --model ridge --paths 100 \
+            --permutations 50 --train-size 400 --test-size 100 --out reports
+          test -s reports/comparison.md
+          test -s reports/simulation_ridge.md
