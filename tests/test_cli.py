@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from ai_stock.cli import build_parser, main
+from ai_stock.cli import _horizon_label, build_parser, main
 from ai_stock.data.loaders import load_csv
 from ai_stock.models.registry import available_models
 
@@ -125,6 +125,41 @@ def test_compare_command_accepts_an_alternative_sort_key(tmp_path: Path) -> None
     )
 
 
+@pytest.mark.parametrize(
+    ("days", "expected"),
+    [(1, "1d"), (3, "3d"), (5, "1w"), (10, "2w"), (21, "1mo"), (63, "3mo"), (252, "1y")],
+)
+def test_horizon_label_matches_the_span(days: int, expected: str) -> None:
+    assert _horizon_label(days) == expected
+
+
+def test_simulate_summary_is_labelled_with_the_simulated_horizon(capsys) -> None:
+    """A 5-day projection must not be reported as a 1-year one."""
+    assert (
+        main(
+            [
+                "simulate",
+                "--model",
+                "ridge",
+                "--sim-horizon",
+                "5",
+                "--paths",
+                "50",
+                "--permutations",
+                "20",
+                *SMALL,
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+
+    assert "1w median return" in output
+    assert "1w 5% quantile" in output
+    assert "1w prob. of loss" in output
+    assert "1y" not in output
+
+
 def test_simulate_command_reports_significance(tmp_path: Path, capsys) -> None:
     out = tmp_path / "reports"
     assert (
@@ -149,6 +184,8 @@ def test_simulate_command_reports_significance(tmp_path: Path, capsys) -> None:
     output = capsys.readouterr().out
     for label in ("realised Sharpe", "p-value", "Sharpe 90% CI", "prob. of loss"):
         assert label in output
+    # Default --sim-horizon is 252 trading days.
+    assert "1y median return" in output
 
 
 def test_backtest_options_change_the_result(tmp_path: Path, capsys) -> None:
