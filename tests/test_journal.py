@@ -122,6 +122,25 @@ def test_appending_the_same_day_twice_is_a_no_op(tmp_path: Path, prices, journal
     assert len(first) == len(second) == 2
 
 
+def test_the_first_write_to_a_new_journal_warns_about_nothing(
+    tmp_path: Path, prices, journal_config
+) -> None:
+    """Concatenating onto an empty frame is a FutureWarning on pandas 2.
+
+    The first write to a fresh journal is exactly that case, so it broke only
+    on the Python version whose resolver picked pandas 2 - the kind of failure
+    that reaches CI rather than a local run.
+    """
+    import warnings
+
+    forecasts = record_forecasts(prices, "ridge", journal_config)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        written = append_forecasts(tmp_path / "fresh.csv", forecasts)
+
+    assert len(written) == len(forecasts)
+
+
 def test_a_missing_journal_reads_as_empty(tmp_path: Path) -> None:
     frame = load_journal(tmp_path / "absent.csv")
     assert frame.empty

@@ -210,9 +210,15 @@ def append_forecasts(path: str | Path, forecasts: list[Forecast]) -> pd.DataFram
         already = existing.set_index(key).index
         incoming = incoming[~incoming.set_index(key).index.isin(already)]
 
-    combined = (
-        pd.concat([existing, incoming], ignore_index=True) if not incoming.empty else existing
-    )
+    # Never hand an empty frame to concat: on pandas 2 that raises a
+    # FutureWarning about all-NA columns, and the first write to a new journal
+    # is exactly that case.
+    if incoming.empty:
+        combined = existing
+    elif existing.empty:
+        combined = incoming
+    else:
+        combined = pd.concat([existing, incoming], ignore_index=True)
     combined = combined.sort_values(["asof_date", "symbol", "model"]).reset_index(drop=True)
 
     path.parent.mkdir(parents=True, exist_ok=True)
