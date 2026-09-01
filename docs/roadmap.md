@@ -1,0 +1,64 @@
+# Roadmap
+
+The daily routine reads this file to decide what to work on, and edits it when
+something is finished or a new gap appears. Items are ordered by how much they
+change what the project can honestly claim - not by how interesting they are to
+build.
+
+Keep each item small enough to land in one reviewed pull request.
+
+## Now
+
+- [ ] **Journal coverage of the live/backtest gap over time.** `hit_rate_z` is a
+  single number over the whole journal. A rolling window would show *when* the
+  edge decayed rather than only that it has.
+- [ ] **Per-symbol position sizing in the journal.** Forecasts are recorded at
+  full size for every symbol. Volatility targeting already exists in the
+  backtest (`BacktestConfig.vol_target`) and should be honoured here too, or
+  the live P&L is not comparable to the backtested one.
+- [ ] **Turnover in the journal report.** The backtest treats turnover as a
+  headline number; the journal does not report it at all, so the live cost drag
+  is invisible.
+
+## Next
+
+- [ ] **Multi-asset portfolio construction.** Everything is single-asset today.
+  Correlated memory names traded together are not four independent bets, and
+  nothing in the framework says so.
+- [ ] **Regime-conditional evaluation.** Report metrics split by realised
+  volatility tercile. A model that only works in calm markets is a different
+  proposition from one that works throughout.
+- [ ] **Deflated Sharpe ratio.** `probabilistic_sharpe_ratio` corrects for
+  sample length and higher moments but not for the number of configurations
+  tried. `screen` already corrects across symbols; the same problem exists
+  across models and windows.
+- [ ] **Feature importance stability.** Importances are averaged across folds
+  but their variance is never reported, so a feature that matters in one fold
+  and not the next looks the same as a consistent one.
+
+## Later
+
+- [ ] **Intraday or weekly bars.** The whole framework assumes daily.
+- [ ] **Borrow costs and short availability.** Shorting is currently free and
+  always possible, which it is not - especially for Taiwan small caps.
+- [ ] **Walk-forward hyper-parameter selection.** Hyper-parameters are fixed
+  and were chosen while looking at the data; selecting them inside each fold
+  would remove one layer of selection bias.
+
+## Done
+
+- [x] Core pipeline: synthetic market, causal features, walk-forward with
+  embargo, cost-aware backtest, Monte Carlo, reports, CLI. (#1)
+- [x] Horizon-aware labelling of the simulate summary. (#2)
+- [x] Universe screen with Benjamini-Hochberg correction across symbols. (#3)
+- [x] Forecast journal, live-vs-backtest gap, and the daily price workflow. (#4)
+
+## Rejected, and why
+
+- **Deep learning models (LSTM/Transformer).** The measured edge on daily bars
+  is a fraction of a percent of variance. Model capacity is not the binding
+  constraint; data and cost are. Adding one would raise the framework's
+  apparent sophistication without changing a single honest conclusion.
+- **Sentiment or news features.** Would require a data source this project has
+  no licence for, and the leakage risk (headline timestamps that precede the
+  event they describe) is severe enough to need its own audit.

@@ -6,9 +6,11 @@ Sharpe ratios with no context is how backtests get oversold.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from ai_stock.config import ExperimentConfig
+from ai_stock.journal import ScoreResult
 from ai_stock.pipeline import ModelRun, ScreenResult, SimulationBundle
 from ai_stock.reporting.report import (
     Report,
@@ -22,6 +24,7 @@ from ai_stock.reporting.report import (
 
 __all__ = [
     "render_backtest_report",
+    "render_journal_report",
     "render_comparison_report",
     "render_screen_report",
     "render_simulation_report",
@@ -511,4 +514,165 @@ def render_screen_report(result: ScreenResult, config: ExperimentConfig) -> str:
             *_caveats(),
         ]
     )
+    return report.render()
+
+
+def _decay_verdict(comparison: dict[str, float]) -> str:
+    """State what the live record says about the backtest's claim."""
+    n = comparison.get("n_scored", 0.0)
+    z = comparison.get("hit_rate_z", float("nan"))
+    if n < 30:
+        return (
+            f"Only {int(n)} forecast(s) have matured. That is far too few to say anything: "
+            "the standard error on a hit rate this small swamps any plausible edge. "
+            "Keep recording."
+        )
+    if not np.isfinite(z):
+        return (
+            f"{int(n)} forecasts scored, but the backtest claim is unavailable to compare against."
+        )
+    if z <= -2.0:
+        return (
+            f"Live accuracy is {format_number(abs(z))} standard errors **below** the backtested "
+            f"claim across {int(n)} forecasts. That is decay, or a backtest that was overfitted "
+            "to begin with. Re-examine before trusting the model further."
+        )
+    if z >= 2.0:
+        return (
+            f"Live accuracy is {format_number(z)} standard errors **above** the backtested claim "
+            f"across {int(n)} forecasts. Pleasant, but treat a large positive gap with the same "
+            "suspicion as a negative one: it usually means the live and backtest setups differ."
+        )
+    return (
+        f"Live accuracy sits within {format_number(abs(z))} standard errors of the backtested "
+        f"claim across {int(n)} forecasts - consistent with the backtest, no decay detected."
+    )
+
+
+def render_journal_report(
+    live: ScoreResult,
+    config: ExperimentConfig,
+    *,
+    model_name: str,
+    comparisons: dict[str, dict[str, float]] | None = None,
+    recorded: int = 0,
+    skipped: list[str] | None = None,
+) -> str:
+    """Report what the live forecast journal says, against what was promised.
+
+    The journal is the only score that cannot be tuned after the fact, so this
+    report leads with the live-versus-backtest gap rather than with P&L.
+    """
+    metrics = live.metrics()
+    report = Report(
+        f"Forecast journal: `{model_name}`",
+        subtitle="Predictions recorded before the outcome existed, scored once it arrived.",
+    )
+
+    pooled = (comparisons or {}).get("__all__", {})
+    report.text(
+        _decay_verdict(pooled) if pooled else _decay_verdict({"n_scored": metrics["n_scored"]})
+    )
+
+    report.heading("Today's run").bullets(
+        [
+            f"Forecasts recorded: {recorded}",
+            "Symbols skipped (too little history to fit): "
+            + (", ".join(f"`{s}`" for s in skipped) if skipped else "none"),
+            f"Forecasts matured and scored: {int(metrics['n_scored'])}",
+            f"Still in flight (horizon not elapsed): {int(metrics['n_pending'])}",
+            f"Forecast horizon: {config.features.horizon} trading day(s)",
+            f"Costs: {config.backtest.total_cost_bps:g} bps per unit traded",
+        ]
+    )
+
+    report.heading("Live performance")
+    report.raw_table(
+        metrics_table(
+            {"live": metrics},
+            keys=(
+                "n_scored",
+                "n_pending",
+                "hit_rate",
+                "live_ic",
+                "live_ic_pooled",
+                "mean_pnl",
+                "total_pnl",
+                "live_sharpe",
+                "n_symbols",
+                "span_days",
+            ),
+            label="metric",
+        )
+    )
+    report.bullets(
+        [
+            "`live_ic` averages the per-symbol correlations, the same way `ic_fold_mean` "
+            "averages per-fold ones. `live_ic_pooled` throws every symbol into one "
+            "correlation and can carry the opposite sign - it is shown only for contrast.",
+            "`live_sharpe` is a health check, not a tradable number: with a multi-day "
+            "horizon the per-forecast returns overlap, so its standard error is understated.",
+        ]
+    )
+
+    if comparisons:
+        report.heading("Live vs. backtest")
+        named = {k: v for k, v in comparisons.items() if k != "__all__"}
+        if named:
+            report.raw_table(
+                metrics_table(
+                    named,
+                    keys=(
+                        "n_scored",
+                        "backtest_directional_accuracy",
+                        "live_hit_rate",
+                        "hit_rate_gap",
+                        "hit_rate_z",
+                        "backtest_ic",
+                        "live_ic",
+                    ),
+                    label="quantity",
+                )
+            )
+        report.bullets(
+            [
+                "`hit_rate_z` is the live shortfall in units of its own standard error. "
+                "Around zero means consistent with the backtest; below -2 means the "
+                "backtest was promising something the live record is not delivering.",
+                "With few scored forecasts the z-score is near zero whatever happens. "
+                "Read `n_scored` first.",
+            ]
+        )
+
+    per_symbol = live.by_symbol()
+    if not per_symbol.empty:
+        report.heading("By symbol")
+        report.dataframe(per_symbol)
+        report.code_block(
+            ascii_bars(
+                list(per_symbol.index),
+                per_symbol["total_pnl"].tolist(),
+                width=44,
+            )
+        )
+
+    if not live.pending.empty:
+        report.heading("In flight")
+        columns = [c for c in ("asof_date", "symbol", "signal", "position") if c in live.pending]
+        upcoming = live.pending[columns].tail(12).copy()
+        if "asof_date" in upcoming:
+            upcoming["asof_date"] = pd.to_datetime(upcoming["asof_date"]).dt.date.astype(str)
+        report.dataframe(upcoming.reset_index(drop=True), index=False)
+
+    report.heading("How to read this").bullets(
+        [
+            "This is the only score in the project that cannot be tuned after the fact - "
+            "every row was written before its outcome existed.",
+            "A live record that matches the backtest is evidence the pipeline is sound. "
+            "It is still not evidence that the edge will persist.",
+            "Costs here are charged on the change in position from the previous journal "
+            "entry, the same convention the backtest uses.",
+        ]
+    )
+    report.heading("Caveats").bullets(_caveats())
     return report.render()

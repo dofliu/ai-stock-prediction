@@ -15,6 +15,14 @@ venv/
 .coverage
 htmlcov/
 
-# Project outputs (anchored to the repo root so src/ai_stock/data/ is tracked)
-/data/
+# Project outputs (anchored to the repo root so src/ai_stock/data/ is tracked).
+# `/data/*` excludes the *contents* rather than the directory itself: git
+# cannot re-include anything under an excluded directory, so the two paths the
+# daily workflow maintains would be unreachable if this were `/data/`.
+/data/*
 /reports/
+
+# The daily workflow's record: prices are what the journal is scored against,
+# and the journal is the one score that cannot be recomputed after the fact.
+!/data/prices/
+!/data/journal/

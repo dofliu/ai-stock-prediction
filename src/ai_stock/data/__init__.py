@@ -2,6 +2,8 @@
 
 from ai_stock.data.loaders import (
     OHLCV_COLUMNS,
+    clamp_bar_extremes,
+    drop_untraded_rows,
     load_csv,
     load_yfinance,
     save_csv,
@@ -12,6 +14,8 @@ from ai_stock.data.synthetic import SyntheticMarket, generate_market, generate_o
 __all__ = [
     "OHLCV_COLUMNS",
     "SyntheticMarket",
+    "clamp_bar_extremes",
+    "drop_untraded_rows",
     "generate_market",
     "generate_ohlcv",
     "load_csv",

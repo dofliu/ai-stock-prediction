@@ -1,0 +1,108 @@
+name: Daily prices and forecast journal
+
+# 22:00 UTC on weekdays: after the US close (20:00-21:00 UTC) and therefore
+# after the Taiwan close (05:30 UTC) of the same trading day, so both markets
+# contribute the same date's bar.
+on:
+  schedule:
+    - cron: "0 22 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      period:
+        description: "History length to request per ticker"
+        default: "15y"
+        required: false
+  # The download is the one code path that cannot be exercised offline, so a
+  # change to it runs here as a dry run: fetch for real, commit nothing.
+  pull_request:
+    paths:
+      - "scripts/fetch_prices.py"
+      - "config/universe.txt"
+      - ".github/workflows/daily-prices.yml"
+      - "src/ai_stock/data/loaders.py"
+      - "src/ai_stock/pipeline.py"
+
+concurrency:
+  group: daily-prices-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    name: Fetch prices, record and score forecasts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . yfinance
+
+      # Failures are recorded but not raised here: the day's data must be
+      # committed before the run is allowed to go red, or a partial outage
+      # costs the bars that did arrive.
+      - name: Fetch prices
+        id: fetch
+        continue-on-error: true
+        run: python scripts/fetch_prices.py --period "${{ inputs.period || '15y' }}"
+
+      - name: Show what was fetched
+        run: |
+          ls -la data/prices/
+          for f in data/prices/*.csv; do
+            echo "--- $f ($(wc -l < "$f") lines) ---"
+            head -2 "$f"
+            tail -1 "$f"
+          done
+
+      - name: Record today's forecasts and score the matured ones
+        run: |
+          ai-stock journal \
+            --data data/prices \
+            --model random_forest \
+            --horizon 5 \
+            --journal data/journal/forecasts.csv \
+            --cost-bps 2 --slippage-bps 3 \
+            --no-compare \
+            --out reports
+
+      - name: Upload the journal report
+        uses: actions/upload-artifact@v4
+        with:
+          name: journal-report
+          path: reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Commit the day's data
+        if: github.event_name != 'pull_request'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/prices data/journal
+          if git diff --cached --quiet; then
+            echo "no new bars or forecasts - nothing to commit"
+            exit 0
+          fi
+          # [skip ci] keeps the test workflow off data-only commits.
+          git commit -m "Update prices and forecast journal ($(date -u +%Y-%m-%d)) [skip ci]"
+          git push
+
+      # Now that the data is safe, surface a partial outage. A universe
+      # silently shrinking from four symbols to one must not look green.
+      - name: Fail if any symbol did not download
+        if: steps.fetch.outcome == 'failure'
+        run: |
+          echo "::error::one or more symbols failed to download - see the Fetch prices step"
+          exit 1
