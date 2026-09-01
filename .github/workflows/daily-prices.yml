@@ -49,7 +49,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e . yfinance
 
+      # Failures are recorded but not raised here: the day's data must be
+      # committed before the run is allowed to go red, or a partial outage
+      # costs the bars that did arrive.
       - name: Fetch prices
+        id: fetch
+        continue-on-error: true
         run: python scripts/fetch_prices.py --period "${{ inputs.period || '15y' }}"
 
       - name: Show what was fetched
@@ -93,3 +98,11 @@ jobs:
           # [skip ci] keeps the test workflow off data-only commits.
           git commit -m "Update prices and forecast journal ($(date -u +%Y-%m-%d)) [skip ci]"
           git push
+
+      # Now that the data is safe, surface a partial outage. A universe
+      # silently shrinking from four symbols to one must not look green.
+      - name: Fail if any symbol did not download
+        if: steps.fetch.outcome == 'failure'
+        run: |
+          echo "::error::one or more symbols failed to download - see the Fetch prices step"
+          exit 1
