@@ -74,6 +74,10 @@ ai-stock simulate --data data/synthetic.csv --model ridge --paths 1000 --out rep
 # 5. 一次篩選一整個族群，並校正多重檢定
 ai-stock screen --tickers MU,2408.TW,2344.TW,2337.TW --model random_forest \
     --horizon 5 --permutations 300 --cache-dir data/cache --out reports
+
+# 6. 記錄今天的預測，並把已到期的計分
+ai-stock journal --data data/prices --model random_forest --horizon 5 \
+    --journal data/journal/forecasts.csv --out reports
 ```
 
 或直接用 `make demo` 一次跑完。若未安裝套件，`python -m ai_stock ...` 等價於 `ai-stock ...`。
@@ -110,6 +114,48 @@ annual turnover  103.9400x
 
 ---
 
+## 每日預測日誌：唯一無法事後調整的分數
+
+回測是拿模型去對「它被配適在附近」的歷史打分。預測日誌做的是更難的事：
+**在結果還不存在時就把預測寫進 CSV，等期距真的走完才計分。**
+這一列在答案出現前就已經落地，任何事後的參數調整都改不了它。
+
+```bash
+ai-stock journal --data data/prices --journal data/journal/forecasts.csv --out reports
+```
+
+每天跑一次，它會：
+
+1. 用目前所有已標記的 bar 配適模型（必然止於最後一根的前 `horizon` 根），對最新收盤發出預測並附加到日誌；
+2. 掃描日誌，只有「`asof_date + horizon` 那根 bar 已經存在」的列才計分；
+3. 比對 live 命中率與回測宣稱值，並用 **z 值**（差距 ÷ 自身標準誤）說明兩者是否一致。
+
+```
+scored / pending   108 / 12
+live hit rate      56.48%
+live IC            0.1824
+vs backtest        claim 50.55% -> live 56.48%  (z = 1.2337)
+```
+
+判讀：**先看 `n_scored`**。少於 30 筆時 z 值不管發生什麼都接近 0，報告會直接說
+「太少，什麼都不能講」。z ≤ −2 才是衰減訊號——回測承諾了 live 交不出來的東西。
+
+> `live_ic` 取各標的 IC 的平均，而非把所有標的丟進同一個相關係數
+> （後者列為 `live_ic_pooled` 僅供對照）。理由與 `ic_fold_mean` 相同：
+> 跨群體匯總會讓 between-group 的均值差異蓋過訊號，甚至翻轉符號。
+
+### 自動化：GitHub Actions 每天抓真實行情
+
+`.github/workflows/daily-prices.yml` 每個交易日 22:00 UTC（美股收盤後，
+同日台股也已收盤）用 runner 的網路抓 `config/universe.txt` 列出的標的，
+記錄預測、計分到期項，然後把 `data/prices/` 與 `data/journal/` commit 回 repo。
+單一 ticker 失敗不影響其他標的；全部失敗才視為異常並讓 job 失敗。
+
+抓價是唯一無法離線測試的路徑，所以只要動到相關檔案，同一個 workflow
+就會在 PR 上以 dry run 執行（真的抓、但不 commit）。
+
+---
+
 ## 框架驗證：它會不會「無中生有」？
 
 這是任何預測框架都該回答的問題。合成市場的可預測成分由 `--ar1` 與 `--reversion`
@@ -137,7 +183,8 @@ ai-stock simulate --model ridge --days 3000 --efficient    # 無邊際（純雜�
 src/ai_stock/
 ├── config.py            # 所有階段共用的 frozen dataclass 設定
 ├── pipeline.py          # 端到端流程（CLI 只是它的薄殼）
-├── cli.py               # data / backtest / compare / simulate / screen / models
+├── cli.py               # data / backtest / compare / simulate / screen / journal / models
+├── journal.py           # 預測日誌：事前記錄、到期計分、live vs 回測
 ├── data/
 │   ├── synthetic.py     # regime 切換 + GARCH 波動叢聚 + 厚尾 + 已知邊際
 │   └── loaders.py       # CSV 載入、OHLCV 驗證、yfinance（選用）

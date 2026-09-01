@@ -259,6 +259,7 @@ def load_universe(
     period: str = "12y",
     cache_dir: Path | str | None = None,
     loader: Callable[[str], pd.DataFrame] | None = None,
+    skip_errors: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """Collect a symbol -> OHLCV mapping from CSV files and/or live tickers.
 
@@ -278,11 +279,17 @@ def load_universe(
     loader:
         Overrides the download function; used by the tests, and handy for
         plugging in another data vendor.
+    skip_errors:
+        Omit a symbol that fails to load instead of raising. A delisted or
+        mistyped ticker should not stop a scheduled job collecting the rest;
+        recover the omissions as ``set(tickers) - set(universe)``.
 
     Raises
     ------
     ValueError
         If neither source is given, or two sources claim the same symbol.
+        Duplicate symbols always raise - that is a configuration error, not a
+        data one, and silently dropping one would hide it.
     """
     if not data_paths and not tickers:
         raise ValueError("provide data_paths, tickers, or both")
@@ -302,13 +309,17 @@ def load_universe(
             if ticker in universe:
                 raise ValueError(f"duplicate symbol {ticker!r} in the universe")
             cached = cache / f"{ticker.replace('/', '_')}.csv" if cache else None
-            if cached is not None and cached.exists():
-                universe[ticker] = load_csv(cached)
-                continue
-            frame = download(ticker)
-            if cached is not None:
-                save_csv(frame, cached)
-            universe[ticker] = frame
+            try:
+                if cached is not None and cached.exists():
+                    universe[ticker] = load_csv(cached)
+                    continue
+                frame = download(ticker)
+                if cached is not None:
+                    save_csv(frame, cached)
+                universe[ticker] = frame
+            except Exception:
+                if not skip_errors:
+                    raise
 
     return universe
 

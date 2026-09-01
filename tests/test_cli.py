@@ -290,6 +290,139 @@ def test_screen_without_a_source_exits_with_code_two(capsys) -> None:
     assert "--data and/or --tickers" in capsys.readouterr().err
 
 
+def _write_universe(folder: Path, *, n_days: int = 700) -> None:
+    from dataclasses import replace as _replace
+
+    from ai_stock.config import SyntheticConfig
+    from ai_stock.data.loaders import save_csv
+    from ai_stock.data.synthetic import generate_ohlcv
+
+    base = SyntheticConfig(n_days=n_days, seed=5)
+    for symbol, seed in (("AAA", 11), ("BBB", 22)):
+        save_csv(generate_ohlcv(_replace(base, seed=seed)), folder / f"{symbol}.csv")
+
+
+def test_journal_records_then_scores(tmp_path: Path, capsys) -> None:
+    folder = tmp_path / "prices"
+    _write_universe(folder)
+    path = tmp_path / "journal" / "forecasts.csv"
+
+    assert (
+        main(
+            [
+                "journal",
+                "--data",
+                str(folder),
+                "--model",
+                "ridge",
+                "--journal",
+                str(path),
+                "--min-train-rows",
+                "300",
+                "--no-compare",
+            ]
+        )
+        == 0
+    )
+
+    assert path.exists()
+    frame = pd.read_csv(path)
+    assert set(frame["symbol"]) == {"AAA", "BBB"}
+    assert {"asof_date", "signal", "position", "horizon"} <= set(frame.columns)
+
+    output = capsys.readouterr().out
+    assert "recorded today     2" in output
+    assert "scored / pending" in output
+
+
+def test_journal_record_is_idempotent_on_unchanged_prices(tmp_path: Path) -> None:
+    folder = tmp_path / "prices"
+    _write_universe(folder)
+    path = tmp_path / "forecasts.csv"
+    argv = [
+        "journal",
+        "--data",
+        str(folder),
+        "--model",
+        "ridge",
+        "--journal",
+        str(path),
+        "--min-train-rows",
+        "300",
+        "--no-compare",
+        "--quiet",
+    ]
+
+    main(argv)
+    main(argv)
+    assert len(pd.read_csv(path)) == 2
+
+
+def test_journal_skips_symbols_with_too_little_history(tmp_path: Path, capsys) -> None:
+    folder = tmp_path / "prices"
+    _write_universe(folder)
+    from ai_stock.data.loaders import save_csv
+    from ai_stock.data.synthetic import generate_ohlcv
+
+    save_csv(generate_ohlcv(n_days=200, seed=9), folder / "SHORT.csv")
+
+    assert (
+        main(
+            [
+                "journal",
+                "--data",
+                str(folder),
+                "--model",
+                "ridge",
+                "--journal",
+                str(tmp_path / "f.csv"),
+                "--min-train-rows",
+                "300",
+                "--no-compare",
+            ]
+        )
+        == 0
+    )
+    assert "skipped: SHORT" in capsys.readouterr().out
+
+
+def test_journal_writes_a_report(tmp_path: Path) -> None:
+    folder = tmp_path / "prices"
+    _write_universe(folder)
+    out = tmp_path / "reports"
+
+    assert (
+        main(
+            [
+                "journal",
+                "--data",
+                str(folder),
+                "--model",
+                "ridge",
+                "--journal",
+                str(tmp_path / "f.csv"),
+                "--min-train-rows",
+                "300",
+                "--no-compare",
+                "--out",
+                str(out),
+                "--quiet",
+            ]
+        )
+        == 0
+    )
+    report = (out / "journal_ridge.md").read_text()
+    assert report.startswith("# Forecast journal")
+    assert "far too few to say anything" in report
+
+
+def test_journal_without_a_source_exits_with_code_two(capsys) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["journal", "--model", "ridge"])
+    assert excinfo.value.code == 2
+    assert "--data and/or --tickers" in capsys.readouterr().err
+
+
 def test_unknown_model_exits_with_code_two(capsys) -> None:
     with pytest.raises(SystemExit) as excinfo:
         main(["compare", "--models", "not_a_model", *SMALL])

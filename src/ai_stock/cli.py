@@ -5,6 +5,7 @@
     ai-stock compare   rank several models over identical folds
     ai-stock simulate  Monte-Carlo and luck-vs-skill test for one model
     ai-stock screen    rank a universe of symbols, corrected for multiple testing
+    ai-stock journal   record today's forecasts and score the ones that matured
     ai-stock models    list the available model names
 
 Every command works on synthetic data by default, so the whole pipeline is
@@ -19,6 +20,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from ai_stock.config import (
@@ -30,6 +32,14 @@ from ai_stock.config import (
     WalkForwardConfig,
 )
 from ai_stock.data.loaders import save_csv
+from ai_stock.journal import (
+    MIN_TRAIN_ROWS,
+    append_forecasts,
+    compare_with_backtest,
+    load_journal,
+    record_forecasts,
+    score_journal,
+)
 from ai_stock.models.registry import available_models
 from ai_stock.pipeline import (
     compare_models,
@@ -43,6 +53,7 @@ from ai_stock.reporting.report import format_number, metrics_table
 from ai_stock.reporting.studies import (
     render_backtest_report,
     render_comparison_report,
+    render_journal_report,
     render_screen_report,
     render_simulation_report,
 )
@@ -269,6 +280,43 @@ def build_parser() -> argparse.ArgumentParser:
         _output_options,
     ):
         add_options(screen)
+
+    journal = subparsers.add_parser(
+        "journal",
+        help="record today's forecasts and score the ones whose horizon has elapsed",
+    )
+    journal.add_argument("--model", default="random_forest", help="model used for forecasts")
+    journal.add_argument(
+        "--journal",
+        type=Path,
+        default=Path("data/journal/forecasts.csv"),
+        help="append-only CSV holding the forecast journal",
+    )
+    journal.add_argument(
+        "--min-train-rows",
+        type=int,
+        default=MIN_TRAIN_ROWS,
+        help="labelled bars a symbol needs before its forecast is recorded",
+    )
+    journal.add_argument(
+        "--skip-record", action="store_true", help="score only, do not add today's forecasts"
+    )
+    journal.add_argument(
+        "--skip-score", action="store_true", help="record only, do not score matured forecasts"
+    )
+    journal.add_argument(
+        "--no-compare",
+        action="store_true",
+        help="skip the walk-forward that produces the backtest claim to compare against",
+    )
+    _data_options(journal, multi=True)
+    for add_options in (
+        _feature_options,
+        _walk_forward_options,
+        _backtest_options,
+        _output_options,
+    ):
+        add_options(journal)
 
     subparsers.add_parser("models", help="list the available model names")
     return parser
@@ -576,6 +624,86 @@ def _command_screen(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_journal(args: argparse.Namespace) -> int:
+    config = _experiment_config(args)
+    tickers = [t.strip() for t in (args.tickers or "").split(",") if t.strip()]
+    if not args.data and not tickers:
+        raise ValueError("journal needs --data and/or --tickers")
+
+    universe = load_universe(
+        data_paths=args.data,
+        tickers=tickers or None,
+        period=args.period,
+        cache_dir=args.cache_dir,
+    )
+
+    recorded: list = []
+    skipped: list[str] = []
+    if not args.skip_record:
+        recorded = record_forecasts(
+            universe, args.model, config, min_train_rows=args.min_train_rows
+        )
+        append_forecasts(args.journal, recorded)
+        skipped = sorted(set(universe) - {f.symbol for f in recorded})
+
+    live = score_journal(load_journal(args.journal), universe, config)
+
+    comparisons: dict[str, dict[str, float]] = {}
+    if not args.skip_score and not args.no_compare and len(live) > 0:
+        claims: list[dict[str, float]] = []
+        for symbol in sorted(live.scored["symbol"].unique()):
+            try:
+                claim = run_model(universe[symbol], args.model, config).metrics()
+            except (ValueError, KeyError, RuntimeError):
+                continue
+            claims.append(claim)
+            symbol_only = replace(live, scored=live.scored[live.scored["symbol"] == symbol])
+            comparisons[symbol] = compare_with_backtest(symbol_only, claim)
+        if claims:
+            pooled = {
+                "directional_accuracy": float(
+                    np.mean([c.get("directional_accuracy", np.nan) for c in claims])
+                ),
+                "ic_fold_mean": float(np.mean([c.get("ic_fold_mean", np.nan) for c in claims])),
+            }
+            comparisons["__all__"] = compare_with_backtest(live, pooled)
+
+    if args.out:
+        report = render_journal_report(
+            live,
+            config,
+            model_name=args.model,
+            comparisons=comparisons or None,
+            recorded=len(recorded),
+            skipped=skipped,
+        )
+        _write(args.out / f"journal_{args.model}.md", report)
+        if not live.scored.empty:
+            live.scored.to_csv(args.out / f"journal_scored_{args.model}.csv", index=False)
+        _echo(f"wrote report to {args.out / f'journal_{args.model}.md'}", quiet=args.quiet)
+
+    metrics = live.metrics()
+    lines = [
+        f"journal            {args.journal}",
+        f"recorded today     {len(recorded)}"
+        + (f"  (skipped: {', '.join(skipped)})" if skipped else ""),
+        f"scored / pending   {int(metrics['n_scored'])} / {int(metrics['n_pending'])}",
+        f"live hit rate      {format_number(metrics['hit_rate'], percent=True)}",
+        f"live IC            {format_number(metrics['live_ic'])}",
+        f"total P&L          {format_number(metrics['total_pnl'], percent=True)}",
+    ]
+    pooled = comparisons.get("__all__")
+    if pooled:
+        claim = format_number(pooled["backtest_directional_accuracy"], percent=True)
+        actual = format_number(pooled["live_hit_rate"], percent=True)
+        lines.append(
+            f"vs backtest        claim {claim} -> live {actual}"
+            f"  (z = {format_number(pooled['hit_rate_z'])})"
+        )
+    _echo("\n".join(lines), quiet=args.quiet)
+    return 0
+
+
 def _command_models(args: argparse.Namespace) -> int:
     del args
     print("\n".join(available_models()))
@@ -588,6 +716,7 @@ _COMMANDS = {
     "compare": _command_compare,
     "simulate": _command_simulate,
     "screen": _command_screen,
+    "journal": _command_journal,
     "models": _command_models,
 }
 
