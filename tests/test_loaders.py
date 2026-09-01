@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
-from ai_stock.data.loaders import load_csv, save_csv, validate_ohlcv
+from ai_stock.data.loaders import drop_untraded_rows, load_csv, save_csv, validate_ohlcv
 
 
 def test_csv_roundtrip_preserves_the_frame(ohlcv: pd.DataFrame, tmp_path: Path) -> None:
@@ -128,3 +129,46 @@ def test_validation_rejects_inconsistent_bars(ohlcv: pd.DataFrame) -> None:
     broken.iloc[3, broken.columns.get_loc("high")] = broken["low"].iloc[3] / 2
     with pytest.raises(ValueError, match="inconsistent bars"):
         validate_ohlcv(broken)
+
+
+# --------------------------------------------------------------------------- #
+# Vendor padding
+# --------------------------------------------------------------------------- #
+def test_untraded_rows_are_dropped_not_accepted(ohlcv: pd.DataFrame) -> None:
+    """Yahoo pads Taiwan listings with blank rows for holidays and halts.
+
+    Those are absences, not data. They are cleaned in the loader so that
+    validate_ohlcv can stay strict for everyone else.
+    """
+    padded = ohlcv.copy().astype(float)
+    padded.iloc[[3, 17]] = np.nan
+
+    with pytest.raises(ValueError, match="missing prices"):
+        validate_ohlcv(padded, name="padded")
+
+    with pytest.warns(UserWarning, match="dropped 2 row"):
+        cleaned = drop_untraded_rows(padded, name="yfinance:2408.TW")
+
+    assert len(cleaned) == len(ohlcv) - 2
+    assert validate_ohlcv(cleaned, name="cleaned") is cleaned
+
+
+def test_a_clean_frame_is_returned_untouched(ohlcv: pd.DataFrame) -> None:
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert drop_untraded_rows(ohlcv, name="clean") is ohlcv
+
+
+def test_a_mostly_blank_download_is_an_error_not_a_holiday(ohlcv: pd.DataFrame) -> None:
+    broken = ohlcv.copy().astype(float)
+    broken.iloc[: int(len(broken) * 0.8)] = np.nan
+
+    with pytest.raises(ValueError, match="broken download, not holidays"):
+        drop_untraded_rows(broken, name="yfinance:BROKEN")
+
+
+def test_dropping_is_a_no_op_without_price_columns() -> None:
+    frame = pd.DataFrame({"volume": [1.0, 2.0]})
+    assert drop_untraded_rows(frame) is frame

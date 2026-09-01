@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -29,6 +30,43 @@ def _normalise_columns(frame: pd.DataFrame) -> pd.DataFrame:
         key = str(column).strip().lower().replace("-", " ")
         renamed[column] = _COLUMN_ALIASES.get(key, key.replace(" ", "_"))
     return frame.rename(columns=renamed)
+
+
+MAX_UNTRADED_FRACTION = 0.5
+"""Above this share of blank rows, a download is broken rather than padded."""
+
+
+def drop_untraded_rows(frame: pd.DataFrame, *, name: str = "data") -> pd.DataFrame:
+    """Remove calendar rows the venue did not trade on.
+
+    Yahoo pads some markets - Taiwan listings notably - with rows carrying
+    ``NaN`` prices for exchange holidays and trading suspensions. Those are
+    absences, not data, and :func:`validate_ohlcv` rightly refuses them, so
+    vendor padding is cleaned here rather than by loosening the contract every
+    other part of the package relies on.
+
+    A file that is mostly blank is a different problem, and raises.
+    """
+    price_columns = [c for c in ("open", "high", "low", "close") if c in frame.columns]
+    if not price_columns:
+        return frame
+
+    cleaned = frame.dropna(subset=price_columns)
+    dropped = len(frame) - len(cleaned)
+    if not dropped:
+        return frame
+
+    if len(frame) and dropped / len(frame) > MAX_UNTRADED_FRACTION:
+        raise ValueError(
+            f"{name}: {dropped} of {len(frame)} rows have no prices "
+            f"({dropped / len(frame):.0%}) - that is a broken download, not holidays"
+        )
+    warnings.warn(
+        f"{name}: dropped {dropped} row(s) with no prices (exchange holidays or halts)",
+        UserWarning,
+        stacklevel=3,
+    )
+    return cleaned
 
 
 def validate_ohlcv(frame: pd.DataFrame, *, name: str = "data") -> pd.DataFrame:
@@ -152,4 +190,5 @@ def load_yfinance(
     frame.index.name = "date"
     frame = frame.sort_index()
     keep = [c for c in (*OHLCV_COLUMNS, "adj_close") if c in frame.columns]
-    return validate_ohlcv(frame[keep], name=f"yfinance:{ticker}")
+    frame = drop_untraded_rows(frame[keep], name=f"yfinance:{ticker}")
+    return validate_ohlcv(frame, name=f"yfinance:{ticker}")
