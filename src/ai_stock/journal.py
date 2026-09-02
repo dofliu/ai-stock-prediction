@@ -37,6 +37,7 @@ __all__ = [
     "compare_with_backtest",
     "load_journal",
     "record_forecasts",
+    "rolling_compare_with_backtest",
     "score_journal",
 ]
 
@@ -394,3 +395,48 @@ def compare_with_backtest(
     else:
         comparison["hit_rate_z"] = float("nan")
     return comparison
+
+
+ROLLING_COMPARISON_COLUMNS = (
+    "asof_date",
+    "n_scored",
+    "backtest_directional_accuracy",
+    "live_hit_rate",
+    "hit_rate_gap",
+    "backtest_ic",
+    "live_ic",
+    "hit_rate_z",
+)
+
+
+def rolling_compare_with_backtest(
+    live: ScoreResult, backtest_metrics: dict[str, float], window: int = 30
+) -> pd.DataFrame:
+    """Slide :func:`compare_with_backtest` over a trailing window of forecasts.
+
+    A single ``hit_rate_z`` over the whole journal answers only whether the
+    live record has drifted from the backtest, not when: a bad early stretch
+    and a good later one can average out and read as zero. This recomputes the
+    same comparison over the most recent ``window`` matured forecasts, ending
+    at each date in turn, so the point where the gap opened is visible rather
+    than only its current size.
+
+    The window counts *matured forecasts*, not calendar days, since a
+    multi-symbol universe records several per day. Returns one row per window
+    end-date with the columns of :func:`compare_with_backtest` plus
+    ``asof_date``; empty (but correctly columned) once fewer than ``window``
+    forecasts have matured.
+    """
+    frame = live.scored.sort_values("asof_date").reset_index(drop=True)
+    if len(frame) < window:
+        return pd.DataFrame(columns=list(ROLLING_COMPARISON_COLUMNS))
+
+    empty_pending = frame.iloc[:0].drop(columns=["realised_return", "pnl"])
+    rows = []
+    for end in range(window, len(frame) + 1):
+        chunk = frame.iloc[end - window : end]
+        window_result = ScoreResult(scored=chunk, pending=empty_pending, cost_bps=live.cost_bps)
+        comparison = compare_with_backtest(window_result, backtest_metrics)
+        comparison["asof_date"] = chunk["asof_date"].iloc[-1]
+        rows.append(comparison)
+    return pd.DataFrame(rows, columns=list(ROLLING_COMPARISON_COLUMNS))

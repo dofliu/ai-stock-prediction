@@ -14,10 +14,12 @@ from ai_stock.data.synthetic import generate_ohlcv
 from ai_stock.journal import (
     JOURNAL_COLUMNS,
     Forecast,
+    ScoreResult,
     append_forecasts,
     compare_with_backtest,
     load_journal,
     record_forecasts,
+    rolling_compare_with_backtest,
     score_journal,
 )
 
@@ -289,3 +291,70 @@ def test_comparison_without_scored_forecasts_yields_no_z(prices, journal_config)
 
     assert comparison["n_scored"] == 0
     assert np.isnan(comparison["hit_rate_z"])
+
+
+def _fake_scored(n: int, hits: list[bool]) -> pd.DataFrame:
+    """A minimal scored frame: always long, right or wrong on cue."""
+    position = np.ones(n)
+    realised = np.where(hits, 1.0, -1.0) * 0.01
+    return pd.DataFrame(
+        {
+            "asof_date": pd.date_range("2024-01-01", periods=n, freq="D"),
+            "symbol": "AAA",
+            "model": "manual",
+            "horizon": 1,
+            "signal": position,
+            "position": position,
+            "close": 100.0,
+            "cost": 0.0,
+            "realised_return": realised,
+            "pnl": position * realised,
+        }
+    )
+
+
+def test_rolling_comparison_is_empty_below_the_window() -> None:
+    scored = _fake_scored(10, [True] * 10)
+    result = ScoreResult(scored=scored, pending=scored.iloc[:0], cost_bps=5.0)
+
+    rolling = rolling_compare_with_backtest(result, {"directional_accuracy": 0.5}, window=30)
+
+    assert rolling.empty
+    assert list(rolling.columns) == [
+        "asof_date",
+        "n_scored",
+        "backtest_directional_accuracy",
+        "live_hit_rate",
+        "hit_rate_gap",
+        "backtest_ic",
+        "live_ic",
+        "hit_rate_z",
+    ]
+
+
+def test_rolling_comparison_finds_when_a_pooled_z_hides_it() -> None:
+    """30 clean hits then 30 clean misses average out to a so-so pooled z.
+
+    The rolling window is the point of this feature: it should show the
+    strong start and the collapse that the single pooled number cannot.
+    """
+    scored = pd.concat(
+        [_fake_scored(30, [True] * 30), _fake_scored(30, [False] * 30)], ignore_index=True
+    )
+    scored["asof_date"] = pd.date_range("2024-01-01", periods=60, freq="D")
+    result = ScoreResult(scored=scored, pending=scored.iloc[:0], cost_bps=5.0)
+    claim = {"directional_accuracy": 0.55}
+
+    rolling = rolling_compare_with_backtest(result, claim, window=30)
+    pooled = compare_with_backtest(result, claim)
+
+    assert len(rolling) == 60 - 30 + 1
+    assert (rolling["n_scored"] == 30.0).all()
+    assert rolling["asof_date"].iloc[0] == scored["asof_date"].iloc[29]
+    assert rolling["asof_date"].iloc[-1] == scored["asof_date"].iloc[-1]
+    assert rolling["live_hit_rate"].iloc[0] == pytest.approx(1.0)
+    assert rolling["live_hit_rate"].iloc[-1] == pytest.approx(0.0)
+    assert rolling["hit_rate_z"].iloc[0] > 2
+    assert rolling["hit_rate_z"].iloc[-1] < -2
+    # The pooled view averages the collapse away; the rolling view does not.
+    assert pooled["hit_rate_z"] > rolling["hit_rate_z"].iloc[-1]

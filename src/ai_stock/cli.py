@@ -38,6 +38,7 @@ from ai_stock.journal import (
     compare_with_backtest,
     load_journal,
     record_forecasts,
+    rolling_compare_with_backtest,
     score_journal,
 )
 from ai_stock.models.registry import available_models
@@ -308,6 +309,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-compare",
         action="store_true",
         help="skip the walk-forward that produces the backtest claim to compare against",
+    )
+    journal.add_argument(
+        "--rolling-window",
+        type=int,
+        default=30,
+        help="matured forecasts per point when tracking hit_rate_z over time",
     )
     _data_options(journal, multi=True)
     for add_options in (
@@ -649,6 +656,7 @@ def _command_journal(args: argparse.Namespace) -> int:
     live = score_journal(load_journal(args.journal), universe, config)
 
     comparisons: dict[str, dict[str, float]] = {}
+    rolling = None
     if not args.skip_score and not args.no_compare and len(live) > 0:
         claims: list[dict[str, float]] = []
         for symbol in sorted(live.scored["symbol"].unique()):
@@ -667,6 +675,7 @@ def _command_journal(args: argparse.Namespace) -> int:
                 "ic_fold_mean": float(np.mean([c.get("ic_fold_mean", np.nan) for c in claims])),
             }
             comparisons["__all__"] = compare_with_backtest(live, pooled)
+            rolling = rolling_compare_with_backtest(live, pooled, window=args.rolling_window)
 
     if args.out:
         report = render_journal_report(
@@ -674,6 +683,7 @@ def _command_journal(args: argparse.Namespace) -> int:
             config,
             model_name=args.model,
             comparisons=comparisons or None,
+            rolling=rolling,
             recorded=len(recorded),
             skipped=skipped,
         )
