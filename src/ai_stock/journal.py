@@ -18,14 +18,14 @@ inspected without this package.
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from ai_stock.backtest.engine import signal_to_positions
-from ai_stock.config import TRADING_DAYS_PER_YEAR, ExperimentConfig
+from ai_stock.backtest.engine import signal_to_positions, simple_returns, trailing_volatility
+from ai_stock.config import TRADING_DAYS_PER_YEAR, BacktestConfig, ExperimentConfig
 from ai_stock.data.loaders import validate_ohlcv
 from ai_stock.features.builder import build_dataset, build_features
 from ai_stock.models.registry import create_model
@@ -233,6 +233,35 @@ MIN_TRAIN_ROWS = 250
 """Labelled bars a symbol needs before its forecast is worth recording."""
 
 
+def _size_position(
+    signal: float, asof: pd.Timestamp, ohlcv: pd.DataFrame, config: BacktestConfig
+) -> float:
+    """Size one forecast exactly as the backtest would size its last bar.
+
+    ``signal_to_positions`` needs a rolling window of asset returns to apply
+    ``vol_target``, which the single-row series a live forecast produces
+    cannot supply. This instead computes trailing volatility from the
+    symbol's full price history up to ``asof`` - causal by construction,
+    since every input predates the forecast - and applies the same scaling
+    :func:`signal_to_positions` uses on its final bar. Without this, a
+    non-default ``vol_target`` made every recorded position silently 0: the
+    single-row call raised ``ValueError`` for lack of ``asset_returns``, and
+    ``record_forecasts`` treats that as "skip this symbol".
+    """
+    unscaled = config if config.vol_target is None else replace(config, vol_target=None)
+    base = float(signal_to_positions(pd.Series([signal], index=[asof]), unscaled).iloc[0])
+    if config.vol_target is None:
+        return base
+
+    asset_returns = simple_returns(ohlcv["close"].astype(float))
+    realised = trailing_volatility(asset_returns, config.vol_lookback)
+    latest_vol = realised.get(asof, float("nan"))
+    if not (latest_vol > 0):  # warm-up, or a flat/degenerate price series
+        return 0.0
+    scaler = config.vol_target / latest_vol
+    return float(np.clip(base * scaler, -config.max_leverage, config.max_leverage))
+
+
 def record_forecasts(
     universe: dict[str, pd.DataFrame],
     model_name: str = "random_forest",
@@ -277,11 +306,7 @@ def record_forecasts(
                 continue
             latest = live.iloc[[-1]]
             signal = float(np.asarray(model.predict(latest), dtype=float).ravel()[0])
-            position = float(
-                signal_to_positions(pd.Series([signal], index=latest.index), config.backtest).iloc[
-                    0
-                ]
-            )
+            position = _size_position(signal, latest.index[-1], ohlcv, config.backtest)
             forecasts.append(
                 Forecast(
                     asof_date=latest.index[-1],

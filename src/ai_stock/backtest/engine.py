@@ -26,7 +26,13 @@ import pandas as pd
 from ai_stock.config import TRADING_DAYS_PER_YEAR, BacktestConfig
 from ai_stock.evaluation.metrics import financial_metrics
 
-__all__ = ["BacktestResult", "run_backtest", "signal_to_positions", "simple_returns"]
+__all__ = [
+    "BacktestResult",
+    "run_backtest",
+    "signal_to_positions",
+    "simple_returns",
+    "trailing_volatility",
+]
 
 _BPS = 1e-4
 
@@ -80,8 +86,13 @@ def simple_returns(close: pd.Series) -> pd.Series:
     return returns.fillna(0.0).rename("asset_return")
 
 
-def _trailing_volatility(returns: pd.Series, lookback: int) -> pd.Series:
-    """Annualised trailing volatility, causal by construction."""
+def trailing_volatility(returns: pd.Series, lookback: int) -> pd.Series:
+    """Annualised trailing volatility, causal by construction.
+
+    Warm-up bars (fewer than ``lookback`` prior returns) are ``NaN`` rather
+    than an estimate from a short window, since :func:`signal_to_positions`
+    and the journal both treat an unknown volatility as "stay flat".
+    """
     return returns.rolling(lookback, min_periods=lookback).std(ddof=1) * np.sqrt(
         TRADING_DAYS_PER_YEAR
     )
@@ -128,7 +139,7 @@ def signal_to_positions(
     if config.vol_target is not None:
         if asset_returns is None:
             raise ValueError("vol_target requires asset_returns to size positions")
-        realised = _trailing_volatility(asset_returns.reindex(signal.index), config.vol_lookback)
+        realised = trailing_volatility(asset_returns.reindex(signal.index), config.vol_lookback)
         # Unknown volatility (warm-up) means no informed size: stay flat.
         scaler = (config.vol_target / realised.where(realised > 0)).fillna(0.0)
         target = (target * scaler).clip(-config.max_leverage, config.max_leverage)

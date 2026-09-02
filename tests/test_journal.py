@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ai_stock.config import BacktestConfig, ExperimentConfig, FeatureConfig
+from ai_stock.config import TRADING_DAYS_PER_YEAR, BacktestConfig, ExperimentConfig, FeatureConfig
 from ai_stock.data.synthetic import generate_ohlcv
 from ai_stock.journal import (
     JOURNAL_COLUMNS,
@@ -78,6 +78,49 @@ def test_forecast_is_anchored_to_the_latest_bar(prices, journal_config) -> None:
     assert forecast.horizon == journal_config.features.horizon
     assert forecast.position in (-1.0, 0.0, 1.0)
     assert np.isfinite(forecast.signal)
+
+
+def test_vol_target_scales_the_recorded_position(prices) -> None:
+    """A non-default ``vol_target`` must scale the position, not silently drop it.
+
+    ``signal_to_positions`` needs a rolling window of asset returns to apply
+    ``vol_target`` and raises without one; handing it the single-row series a
+    live forecast produces used to trip that error, and ``record_forecasts``
+    treats any ``ValueError`` as "skip this symbol". A configured vol_target
+    used to mean every recorded forecast for every symbol vanished.
+    """
+    frame = prices["AAA"]
+    flat_config = ExperimentConfig(
+        features=FeatureConfig(horizon=5),
+        backtest=BacktestConfig(cost_bps=2.0, slippage_bps=3.0),
+    )
+    targeted_config = ExperimentConfig(
+        features=FeatureConfig(horizon=5),
+        backtest=BacktestConfig(cost_bps=2.0, slippage_bps=3.0, vol_target=0.1, vol_lookback=20),
+    )
+
+    unscaled = record_forecasts({"AAA": frame}, "ridge", flat_config)[0]
+    scaled = record_forecasts({"AAA": frame}, "ridge", targeted_config)[0]
+
+    assert scaled.signal == pytest.approx(unscaled.signal)
+
+    returns = frame["close"].astype(float).pct_change().fillna(0.0)
+    annualised = returns.rolling(20, min_periods=20).std(ddof=1) * math.sqrt(TRADING_DAYS_PER_YEAR)
+    expected = float(np.clip(unscaled.position * (0.1 / annualised.iloc[-1]), -1.0, 1.0))
+    assert scaled.position == pytest.approx(expected)
+
+
+def test_vol_target_leaves_a_warmed_up_symbol_flat_until_its_own_warm_up(prices) -> None:
+    """A vol_lookback longer than the available history means unknown volatility."""
+    frame = prices["AAA"]
+    config = ExperimentConfig(
+        features=FeatureConfig(horizon=5),
+        backtest=BacktestConfig(vol_target=0.1, vol_lookback=len(frame) + 10),
+    )
+
+    forecast = record_forecasts({"AAA": frame}, "ridge", config)[0]
+
+    assert forecast.position == 0.0
 
 
 def test_a_symbol_too_short_to_fit_is_skipped_not_raised(prices, journal_config) -> None:
