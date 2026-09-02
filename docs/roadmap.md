@@ -9,9 +9,6 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Now
 
-- [ ] **Journal coverage of the live/backtest gap over time.** `hit_rate_z` is a
-  single number over the whole journal. A rolling window would show *when* the
-  edge decayed rather than only that it has.
 - [ ] **Per-symbol position sizing in the journal.** Forecasts are recorded at
   full size for every symbol. Volatility targeting already exists in the
   backtest (`BacktestConfig.vol_target`) and should be honoured here too, or
@@ -52,6 +49,8 @@ Keep each item small enough to land in one reviewed pull request.
 - [x] Horizon-aware labelling of the simulate summary. (#2)
 - [x] Universe screen with Benjamini-Hochberg correction across symbols. (#3)
 - [x] Forecast journal, live-vs-backtest gap, and the daily price workflow. (#4)
+- [x] Rolling hit_rate_z over the journal's timeline, so a decay shows *when*
+  it started rather than only that it happened in aggregate.
 
 ## Rejected, and why
 

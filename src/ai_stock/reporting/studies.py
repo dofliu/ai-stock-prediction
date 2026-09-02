@@ -555,6 +555,7 @@ def render_journal_report(
     *,
     model_name: str,
     comparisons: dict[str, dict[str, float]] | None = None,
+    rolling: pd.DataFrame | None = None,
     recorded: int = 0,
     skipped: list[str] | None = None,
 ) -> str:
@@ -643,6 +644,25 @@ def render_journal_report(
                 "Read `n_scored` first.",
             ]
         )
+
+    if rolling is not None and not rolling.empty:
+        report.heading("Live vs. backtest over time")
+        report.text(
+            f"`hit_rate_z` over the trailing {int(rolling['n_scored'].iloc[0])} matured "
+            "forecasts, ending at each date shown. A single pooled z-score cannot say "
+            "*when* a gap opened; this can."
+        )
+        dates = pd.to_datetime(rolling["asof_date"]).dt.date.astype(str)
+        report.code_block(
+            ascii_line_chart(
+                {"hit_rate_z": pd.Series(rolling["hit_rate_z"].to_numpy(), index=dates)},
+                width=72,
+                height=12,
+            )
+        )
+        tail = rolling[["asof_date", "n_scored", "live_hit_rate", "hit_rate_z"]].tail(10).copy()
+        tail["asof_date"] = pd.to_datetime(tail["asof_date"]).dt.date.astype(str)
+        report.dataframe(tail.reset_index(drop=True), index=False)
 
     per_symbol = live.by_symbol()
     if not per_symbol.empty:
