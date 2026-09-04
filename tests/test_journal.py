@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -78,6 +79,40 @@ def test_forecast_is_anchored_to_the_latest_bar(prices, journal_config) -> None:
     assert forecast.horizon == journal_config.features.horizon
     assert forecast.position in (-1.0, 0.0, 1.0)
     assert np.isfinite(forecast.signal)
+
+
+def test_vol_target_scales_the_recorded_position(prices, journal_config) -> None:
+    """A live forecast should size like the backtest would at that same date.
+
+    Regression test: record_forecasts used to hand signal_to_positions a
+    single-row signal series, so the trailing-volatility window vol_target
+    needs came back empty for every symbol - silently recording every
+    forecast at full, unscaled size instead of raising, since the caller
+    swallows the resulting ValueError.
+    """
+    # A deliberately tiny target forces the scaler well below 1, so a position
+    # of exactly +/-1.0 (the pre-fix, unscaled behaviour) cannot pass by
+    # coincidence the way it could with a realistic vol_target.
+    config = replace(
+        journal_config,
+        backtest=replace(journal_config.backtest, vol_target=0.01, vol_lookback=20),
+    )
+    frame = prices["AAA"]
+
+    forecast = record_forecasts({"AAA": frame}, "ridge", config)[0]
+    assert forecast.signal != 0.0
+
+    returns = frame["close"].astype(float).pct_change().fillna(0.0)
+    realised_vol = returns.rolling(20, min_periods=20).std(ddof=1) * math.sqrt(252)
+    scaler = config.backtest.vol_target / realised_vol.loc[forecast.asof_date]
+    expected = np.clip(
+        math.copysign(config.backtest.max_leverage, forecast.signal) * scaler,
+        -config.backtest.max_leverage,
+        config.backtest.max_leverage,
+    )
+
+    assert forecast.position == pytest.approx(expected)
+    assert abs(forecast.position) < 1.0
 
 
 def test_a_symbol_too_short_to_fit_is_skipped_not_raised(prices, journal_config) -> None:

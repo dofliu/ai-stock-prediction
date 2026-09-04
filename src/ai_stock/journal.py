@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ai_stock.backtest.engine import signal_to_positions
+from ai_stock.backtest.engine import signal_to_positions, simple_returns
 from ai_stock.config import TRADING_DAYS_PER_YEAR, ExperimentConfig
 from ai_stock.data.loaders import validate_ohlcv
 from ai_stock.features.builder import build_dataset, build_features
@@ -276,21 +276,35 @@ def record_forecasts(
             if live.empty:
                 continue
             latest = live.iloc[[-1]]
+            asof = latest.index[-1]
             signal = float(np.asarray(model.predict(latest), dtype=float).ravel()[0])
+
+            # signal_to_positions needs a real trailing-volatility window to
+            # honour vol_target, not just the single date being forecast: a
+            # one-row signal series reindexes the return history down to that
+            # same row and the rolling window comes back all-NaN, which silently
+            # sizes every forecast to zero (or raises, since vol_target requires
+            # asset_returns). Carrying the symbol's own price history as flat
+            # (zero-signal) history alongside the live forecast gives the vol
+            # scaler the same lookback it would see inside a backtest, while
+            # only the final row - the one actually being recorded - is used.
+            signal_series = pd.Series(0.0, index=ohlcv.index)
+            signal_series.loc[asof] = signal
+            asset_returns = simple_returns(ohlcv["close"].astype(float))
             position = float(
-                signal_to_positions(pd.Series([signal], index=latest.index), config.backtest).iloc[
-                    0
-                ]
+                signal_to_positions(
+                    signal_series, config.backtest, asset_returns=asset_returns
+                ).loc[asof]
             )
             forecasts.append(
                 Forecast(
-                    asof_date=latest.index[-1],
+                    asof_date=asof,
                     symbol=symbol,
                     model=model_name,
                     horizon=config.features.horizon,
                     signal=signal,
                     position=position,
-                    close=float(ohlcv.loc[latest.index[-1], "close"]),
+                    close=float(ohlcv.loc[asof, "close"]),
                 )
             )
         except (ValueError, KeyError, RuntimeError):

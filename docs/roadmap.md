@@ -9,10 +9,13 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Now
 
-- [ ] **Per-symbol position sizing in the journal.** Forecasts are recorded at
-  full size for every symbol. Volatility targeting already exists in the
-  backtest (`BacktestConfig.vol_target`) and should be honoured here too, or
-  the live P&L is not comparable to the backtested one.
+- [x] **Per-symbol position sizing in the journal.** `record_forecasts` fed
+  `signal_to_positions` a one-row signal series, so the trailing-volatility
+  window `vol_target` needs came back empty and the resulting `ValueError`
+  was swallowed by the per-symbol `except` - every forecast recorded at full,
+  unscaled size whenever `--vol-target` was set, silently. Fixed by carrying
+  the symbol's own price history alongside the live forecast so the vol
+  scaler sees the same lookback it would inside a backtest.
 - [ ] **Turnover in the journal report.** The backtest treats turnover as a
   headline number; the journal does not report it at all, so the live cost drag
   is invisible.
