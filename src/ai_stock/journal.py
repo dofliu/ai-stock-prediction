@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ai_stock.backtest.engine import signal_to_positions
+from ai_stock.backtest.engine import signal_to_positions, simple_returns
 from ai_stock.config import TRADING_DAYS_PER_YEAR, ExperimentConfig
 from ai_stock.data.loaders import validate_ohlcv
 from ai_stock.features.builder import build_dataset, build_features
@@ -277,20 +277,32 @@ def record_forecasts(
                 continue
             latest = live.iloc[[-1]]
             signal = float(np.asarray(model.predict(latest), dtype=float).ravel()[0])
+
+            # Sized over the symbol's own trailing volatility, honouring
+            # `BacktestConfig.vol_target` exactly as the backtest does - a
+            # single flat size for every symbol makes the live P&L
+            # incomparable to the backtested one whenever volatilities
+            # differ. The rolling estimate needs history *before* the asof
+            # date, so the signal is placed on the full return series rather
+            # than a lone point; only the asof row is kept.
+            asof = latest.index[-1]
+            asset_returns = simple_returns(ohlcv["close"].astype(float))
+            sized_signal = pd.Series(0.0, index=asset_returns.index)
+            sized_signal.loc[asof] = signal
             position = float(
-                signal_to_positions(pd.Series([signal], index=latest.index), config.backtest).iloc[
-                    0
+                signal_to_positions(sized_signal, config.backtest, asset_returns=asset_returns).loc[
+                    asof
                 ]
             )
             forecasts.append(
                 Forecast(
-                    asof_date=latest.index[-1],
+                    asof_date=asof,
                     symbol=symbol,
                     model=model_name,
                     horizon=config.features.horizon,
                     signal=signal,
                     position=position,
-                    close=float(ohlcv.loc[latest.index[-1], "close"]),
+                    close=float(ohlcv.loc[asof, "close"]),
                 )
             )
         except (ValueError, KeyError, RuntimeError):

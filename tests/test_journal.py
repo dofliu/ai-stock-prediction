@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from ai_stock.backtest.engine import signal_to_positions, simple_returns
 from ai_stock.config import BacktestConfig, ExperimentConfig, FeatureConfig
 from ai_stock.data.synthetic import generate_ohlcv
 from ai_stock.journal import (
@@ -100,6 +101,69 @@ def test_every_registered_model_can_be_recorded(prices, journal_config) -> None:
     for name in ("ridge", "random_forest", "logistic", "momentum"):
         recorded = record_forecasts({"AAA": prices["AAA"]}, name, journal_config)
         assert len(recorded) == 1 and recorded[0].model == name
+
+
+def test_vol_target_is_honoured_not_silently_skipped(prices, journal_config) -> None:
+    """Before this fix, setting `vol_target` here dropped every symbol silently.
+
+    `signal_to_positions` raises when `vol_target` is set without
+    `asset_returns`, and `record_forecasts` swallows that raise in its
+    per-symbol ``except (ValueError, ...)`` - so a vol-targeted journal
+    config looked identical to a healthy universe with nothing to record.
+    """
+    config = ExperimentConfig(
+        features=journal_config.features,
+        backtest=BacktestConfig(
+            cost_bps=2.0, slippage_bps=3.0, vol_target=0.10, vol_lookback=20, max_leverage=3.0
+        ),
+    )
+
+    forecasts = record_forecasts({"AAA": prices["AAA"]}, "momentum", config)
+
+    assert len(forecasts) == 1
+    forecast = forecasts[0]
+
+    # The position must match sizing the signal by the symbol's own trailing
+    # volatility over its full history, exactly as the backtest would.
+    returns = simple_returns(prices["AAA"]["close"].astype(float))
+    expected_signal = pd.Series(0.0, index=returns.index)
+    expected_signal.loc[forecast.asof_date] = forecast.signal
+    expected_position = signal_to_positions(
+        expected_signal, config.backtest, asset_returns=returns
+    ).loc[forecast.asof_date]
+
+    assert forecast.position == pytest.approx(expected_position)
+    assert 0.0 < abs(forecast.position) <= config.backtest.max_leverage
+
+
+def test_vol_target_sizes_two_symbols_by_their_own_volatility(journal_config) -> None:
+    """Per-symbol sizing, not one flat size for the whole universe.
+
+    A quiet symbol and a symbol scaled up to be much noisier should not end
+    up trading the same size once `vol_target` is honoured, even with an
+    identical model and signal-generating process.
+    """
+    calm = generate_ohlcv(n_days=700, seed=11)
+    # Scale log returns (not price levels) so the resulting series is exactly
+    # 5x as volatile, then flatten OHLC to that close - the bar shape carries
+    # no volatility information here, only the day-to-day return does.
+    log_returns = np.log(calm["close"].astype(float)).diff().fillna(0.0)
+    scaled_close = float(calm["close"].iloc[0]) * np.exp((log_returns * 5.0).cumsum())
+    loud = calm.copy()
+    for column in ("open", "high", "low", "close"):
+        loud[column] = scaled_close
+
+    config = ExperimentConfig(
+        features=journal_config.features,
+        backtest=BacktestConfig(
+            cost_bps=2.0, slippage_bps=3.0, vol_target=0.10, vol_lookback=20, max_leverage=10.0
+        ),
+    )
+    forecasts = record_forecasts({"CALM": calm, "LOUD": loud}, "momentum", config)
+    by_symbol = {f.symbol: f for f in forecasts}
+
+    assert set(by_symbol) == {"CALM", "LOUD"}
+    assert abs(by_symbol["LOUD"].position) < abs(by_symbol["CALM"].position)
 
 
 # --------------------------------------------------------------------------- #
