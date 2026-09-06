@@ -602,6 +602,7 @@ def render_journal_report(
                 "live_sharpe",
                 "n_symbols",
                 "span_days",
+                "live_annual_turnover",
             ),
             label="metric",
         )
@@ -613,6 +614,8 @@ def render_journal_report(
             "correlation and can carry the opposite sign - it is shown only for contrast.",
             "`live_sharpe` is a health check, not a tradable number: with a multi-day "
             "horizon the per-forecast returns overlap, so its standard error is understated.",
+            "`live_annual_turnover` counts every recorded forecast, matured or not - a "
+            "position pays for flipping the day it flips, not once its horizon elapses.",
         ]
     )
 

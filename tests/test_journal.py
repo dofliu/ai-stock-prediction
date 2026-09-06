@@ -300,6 +300,44 @@ def test_scoring_an_empty_journal_is_safe(prices, journal_config) -> None:
     assert result.by_symbol().empty
 
 
+def test_turnover_counts_pending_forecasts_not_just_scored(tmp_path: Path, prices) -> None:
+    """A position that flips today pays for it today, before any horizon elapses.
+
+    Every one of these forecasts is deliberately still pending (horizon=5,
+    only 4 daily entries), so a turnover that waited on `scored` would report
+    NaN even though the journal shows two flips.
+    """
+    config = ExperimentConfig(
+        features=FeatureConfig(horizon=5), backtest=BacktestConfig(cost_bps=1.0, slippage_bps=0.0)
+    )
+    dates = prices["AAA"].index[-4:]
+    flipping = [
+        Forecast(d, "AAA", "manual", 5, s, p, 100.0)
+        for d, s, p in zip(dates, [1.0, -1.0, 1.0, 1.0], [1.0, -1.0, 1.0, 1.0], strict=True)
+    ]
+    path = tmp_path / "f.csv"
+    append_forecasts(path, flipping)
+
+    result = score_journal(load_journal(path), prices, config)
+    metrics = result.metrics()
+
+    assert metrics["n_scored"] == 0
+    # Positions are [1, -1, 1, 1]; the first has no prior position to diff
+    # against, so the mean is over the remaining three: (2 + 2 + 0) / 3.
+    expected = (4.0 / 3.0) * 252
+    assert metrics["live_annual_turnover"] == pytest.approx(expected)
+
+
+def test_turnover_is_nan_with_a_single_forecast_per_symbol(prices, journal_config) -> None:
+    forecasts = record_forecasts(prices, "ridge", journal_config)
+    result = ScoreResult(
+        scored=pd.DataFrame(columns=[*JOURNAL_COLUMNS, "cost", "realised_return", "pnl"]),
+        pending=pd.DataFrame([f.as_row() for f in forecasts]).assign(cost=0.0),
+        cost_bps=5.0,
+    )
+    assert np.isnan(result.metrics()["live_annual_turnover"])
+
+
 def test_metrics_and_per_symbol_breakdown(daily_journal, prices, journal_config) -> None:
     result = score_journal(load_journal(daily_journal), prices, journal_config)
     metrics = result.metrics()

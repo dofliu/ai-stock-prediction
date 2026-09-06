@@ -98,6 +98,26 @@ class ScoreResult:
     def __len__(self) -> int:
         return len(self.scored)
 
+    def _annual_turnover(self, periods_per_year: int = TRADING_DAYS_PER_YEAR) -> float:
+        """Average annualised position turnover, mirroring the backtest's ``annual_turnover``.
+
+        Uses every recorded forecast, matured or not: a position that flips
+        every day pays for it the moment it flips, not once its horizon
+        elapses, so this should not wait on scoring the way `hit_rate` and
+        `live_ic` do. Averaged per symbol first, same convention as `live_ic`.
+        """
+        columns = ["asof_date", "symbol", "position"]
+        combined = pd.concat([self.scored[columns], self.pending[columns]], ignore_index=True)
+        if combined.empty:
+            return float("nan")
+        turnovers = []
+        for _, group in combined.groupby("symbol"):
+            ordered = group.sort_values("asof_date")
+            if len(ordered) < 2:
+                continue
+            turnovers.append(float(ordered["position"].diff().abs().mean() * periods_per_year))
+        return float(np.mean(turnovers)) if turnovers else float("nan")
+
     def metrics(self) -> dict[str, float]:
         """Live performance across every matured forecast."""
         empty = dict.fromkeys(
@@ -112,11 +132,13 @@ class ScoreResult:
                 "live_sharpe",
                 "n_symbols",
                 "span_days",
+                "live_annual_turnover",
             ),
             float("nan"),
         )
         empty["n_scored"] = 0.0
         empty["n_pending"] = float(len(self.pending))
+        empty["live_annual_turnover"] = self._annual_turnover()
         if self.scored.empty:
             return empty
 
@@ -162,6 +184,7 @@ class ScoreResult:
             "live_sharpe": sharpe,
             "n_symbols": float(frame["symbol"].nunique()),
             "span_days": float((span.max() - span.min()).days),
+            "live_annual_turnover": empty["live_annual_turnover"],
         }
 
     def by_symbol(self) -> pd.DataFrame:

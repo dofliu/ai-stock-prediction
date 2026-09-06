@@ -16,9 +16,11 @@ Keep each item small enough to land in one reviewed pull request.
   raises when `vol_target` is set - a raise the per-symbol `except
   (ValueError, ...)` swallowed, so a vol-targeted config silently recorded
   nothing for any symbol instead of erroring or scaling.
-- [ ] **Turnover in the journal report.** The backtest treats turnover as a
-  headline number; the journal does not report it at all, so the live cost drag
-  is invisible.
+- [x] **Turnover in the journal report.** `ScoreResult.metrics()` now reports
+  `live_annual_turnover`, averaged per symbol the same way `live_ic` is. It
+  counts every recorded forecast, matured or not, since a position pays for
+  flipping the day it flips rather than once its horizon elapses - waiting
+  on `scored` would report nothing for weeks after the journal starts.
 
 ## Next
 
