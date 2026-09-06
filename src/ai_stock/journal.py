@@ -107,9 +107,19 @@ class ScoreResult:
         `live_ic` do. Averaged per symbol first, same convention as `live_ic`.
         """
         columns = ["asof_date", "symbol", "position"]
-        combined = pd.concat([self.scored[columns], self.pending[columns]], ignore_index=True)
-        if combined.empty:
+        scored, pending = self.scored[columns], self.pending[columns]
+        # Never hand an empty frame to concat: on pandas 2 that raises a
+        # FutureWarning about all-NA columns (see `append_forecasts`), and a
+        # journal with nothing scored yet - the common case right after it
+        # starts - is exactly that.
+        if scored.empty and pending.empty:
             return float("nan")
+        if scored.empty:
+            combined = pending
+        elif pending.empty:
+            combined = scored
+        else:
+            combined = pd.concat([scored, pending], ignore_index=True)
         turnovers = []
         for _, group in combined.groupby("symbol"):
             ordered = group.sort_values("asof_date")
