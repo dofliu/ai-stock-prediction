@@ -600,6 +600,7 @@ def render_journal_report(
                 "mean_pnl",
                 "total_pnl",
                 "live_sharpe",
+                "annual_turnover",
                 "n_symbols",
                 "span_days",
             ),
@@ -613,6 +614,10 @@ def render_journal_report(
             "correlation and can carry the opposite sign - it is shown only for contrast.",
             "`live_sharpe` is a health check, not a tradable number: with a multi-day "
             "horizon the per-forecast returns overlap, so its standard error is understated.",
+            "`annual_turnover` is the same annualised traded-notional measure the backtest "
+            "reports. Multiply it by the cost in bps to see the yearly cost drag this "
+            "journal has actually paid - `total_pnl` already nets it out, but turnover is "
+            "what makes that drag visible on its own.",
         ]
     )
 

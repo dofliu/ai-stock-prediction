@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from ai_stock.backtest.engine import signal_to_positions, simple_returns
-from ai_stock.config import BacktestConfig, ExperimentConfig, FeatureConfig
+from ai_stock.config import TRADING_DAYS_PER_YEAR, BacktestConfig, ExperimentConfig, FeatureConfig
 from ai_stock.data.synthetic import generate_ohlcv
 from ai_stock.journal import (
     JOURNAL_COLUMNS,
@@ -275,6 +275,9 @@ def test_costs_are_charged_on_the_change_in_position(tmp_path: Path, prices) -> 
     # 0 -> +1 (1 unit), +1 -> -1 (2), -1 -> +1 (2), then no change (0).
     assert costs == [10e-4, 20e-4, 20e-4, 0.0]
 
+    turnover = pd.concat([result.scored["turnover"], result.pending["turnover"]]).tolist()
+    assert turnover == [1.0, 2.0, 2.0, 0.0]
+
 
 def test_pnl_is_position_times_return_less_cost(daily_journal, prices, journal_config) -> None:
     result = score_journal(load_journal(daily_journal), prices, journal_config)
@@ -308,6 +311,8 @@ def test_metrics_and_per_symbol_breakdown(daily_journal, prices, journal_config)
     assert metrics["n_symbols"] == 2
     assert 0.0 <= metrics["hit_rate"] <= 1.0
     assert metrics["total_pnl"] == pytest.approx(result.scored["pnl"].sum())
+    expected_turnover = result.scored["turnover"].mean() * TRADING_DAYS_PER_YEAR
+    assert metrics["annual_turnover"] == pytest.approx(expected_turnover)
 
     per_symbol = result.by_symbol()
     assert set(per_symbol.index) == {"AAA", "BBB"}
@@ -370,6 +375,7 @@ def _fake_scored(n: int, hits: list[bool]) -> pd.DataFrame:
             "signal": position,
             "position": position,
             "close": 100.0,
+            "turnover": 0.0,
             "cost": 0.0,
             "realised_return": realised,
             "pnl": position * realised,
