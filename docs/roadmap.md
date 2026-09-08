@@ -12,6 +12,18 @@ Keep each item small enough to land in one reviewed pull request.
 - [ ] **Turnover in the journal report.** The backtest treats turnover as a
   headline number; the journal does not report it at all, so the live cost drag
   is invisible.
+- [x] **Per-symbol position sizing in the journal.** `record_forecasts` now
+  sizes each forecast by the symbol's own trailing volatility when
+  `BacktestConfig.vol_target` is set, the same way the backtest does. It
+  previously called `signal_to_positions` without `asset_returns`, which
+  raises when `vol_target` is set - a raise the per-symbol `except
+  (ValueError, ...)` swallowed, so a vol-targeted config silently recorded
+  nothing for any symbol instead of erroring or scaling.
+- [x] **Turnover in the journal report.** `score_journal` now records each
+  row's raw position change as `turnover`, and `ScoreResult.metrics()` reports
+  `annual_turnover` - the same annualised-notional figure the backtest treats
+  as a headline number - alongside hit rate and IC in the journal report and
+  the CLI summary.
 
 ## Next
 

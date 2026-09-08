@@ -26,6 +26,8 @@ import pandas as pd
 
 from ai_stock.backtest.engine import signal_to_positions, simple_returns, trailing_volatility
 from ai_stock.config import TRADING_DAYS_PER_YEAR, BacktestConfig, ExperimentConfig
+from ai_stock.backtest.engine import signal_to_positions, simple_returns
+from ai_stock.config import TRADING_DAYS_PER_YEAR, ExperimentConfig
 from ai_stock.data.loaders import validate_ohlcv
 from ai_stock.features.builder import build_dataset, build_features
 from ai_stock.models.registry import create_model
@@ -110,6 +112,7 @@ class ScoreResult:
                 "mean_pnl",
                 "total_pnl",
                 "live_sharpe",
+                "annual_turnover",
                 "n_symbols",
                 "span_days",
             ),
@@ -151,6 +154,11 @@ class ScoreResult:
             else float("nan")
         )
         span = pd.to_datetime(frame["asof_date"])
+        # Mirrors the backtest's `annual_turnover`: mean traded notional per
+        # forecast, annualised by the number of trading days in a year. Each
+        # symbol is recorded at most once per trading day, so this is on the
+        # same footing as the backtest's mean-per-bar figure.
+        annual_turnover = float(frame["turnover"].mean() * TRADING_DAYS_PER_YEAR)
         return {
             "n_scored": float(len(frame)),
             "n_pending": float(len(self.pending)),
@@ -160,6 +168,7 @@ class ScoreResult:
             "mean_pnl": float(np.mean(pnl)),
             "total_pnl": float(np.sum(pnl)),
             "live_sharpe": sharpe,
+            "annual_turnover": annual_turnover,
             "n_symbols": float(frame["symbol"].nunique()),
             "span_days": float((span.max() - span.min()).days),
         }
@@ -307,15 +316,32 @@ def record_forecasts(
             latest = live.iloc[[-1]]
             signal = float(np.asarray(model.predict(latest), dtype=float).ravel()[0])
             position = _size_position(signal, latest.index[-1], ohlcv, config.backtest)
+
+            # Sized over the symbol's own trailing volatility, honouring
+            # `BacktestConfig.vol_target` exactly as the backtest does - a
+            # single flat size for every symbol makes the live P&L
+            # incomparable to the backtested one whenever volatilities
+            # differ. The rolling estimate needs history *before* the asof
+            # date, so the signal is placed on the full return series rather
+            # than a lone point; only the asof row is kept.
+            asof = latest.index[-1]
+            asset_returns = simple_returns(ohlcv["close"].astype(float))
+            sized_signal = pd.Series(0.0, index=asset_returns.index)
+            sized_signal.loc[asof] = signal
+            position = float(
+                signal_to_positions(sized_signal, config.backtest, asset_returns=asset_returns).loc[
+                    asof
+                ]
+            )
             forecasts.append(
                 Forecast(
-                    asof_date=latest.index[-1],
+                    asof_date=asof,
                     symbol=symbol,
                     model=model_name,
                     horizon=config.features.horizon,
                     signal=signal,
                     position=position,
-                    close=float(ohlcv.loc[latest.index[-1], "close"]),
+                    close=float(ohlcv.loc[asof, "close"]),
                 )
             )
         except (ValueError, KeyError, RuntimeError):
@@ -352,7 +378,9 @@ def score_journal(
     cost_rate = config.backtest.total_cost_bps * _BPS
 
     if journal.empty:
-        empty = pd.DataFrame(columns=[*JOURNAL_COLUMNS, "cost", "realised_return", "pnl"])
+        empty = pd.DataFrame(
+            columns=[*JOURNAL_COLUMNS, "turnover", "cost", "realised_return", "pnl"]
+        )
         return ScoreResult(
             scored=empty,
             pending=empty.drop(columns=["realised_return", "pnl"]),
@@ -366,7 +394,8 @@ def score_journal(
     # Cost is charged on the change from the position previously held in that
     # symbol, which is what the journal's own history says it was.
     previous = frame.groupby(["symbol", "model"])["position"].shift(1).fillna(0.0)
-    frame["cost"] = (frame["position"] - previous).abs() * cost_rate
+    frame["turnover"] = (frame["position"] - previous).abs()
+    frame["cost"] = frame["turnover"] * cost_rate
 
     realised: list[float | None] = []
     for row in frame.itertuples(index=False):

@@ -701,6 +701,7 @@ def _command_journal(args: argparse.Namespace) -> int:
         f"live hit rate      {format_number(metrics['hit_rate'], percent=True)}",
         f"live IC            {format_number(metrics['live_ic'])}",
         f"total P&L          {format_number(metrics['total_pnl'], percent=True)}",
+        f"annual turnover    {format_number(metrics['annual_turnover'])}",
     ]
     pooled = comparisons.get("__all__")
     if pooled:
