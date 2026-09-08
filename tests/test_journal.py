@@ -10,7 +10,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ai_stock.config import BacktestConfig, ExperimentConfig, FeatureConfig
+from ai_stock.backtest.engine import signal_to_positions, simple_returns
+from ai_stock.config import TRADING_DAYS_PER_YEAR, BacktestConfig, ExperimentConfig, FeatureConfig
 from ai_stock.data.synthetic import generate_ohlcv
 from ai_stock.journal import (
     JOURNAL_COLUMNS,
@@ -113,6 +114,47 @@ def test_vol_target_scales_the_recorded_position(prices, journal_config) -> None
 
     assert forecast.position == pytest.approx(expected)
     assert abs(forecast.position) < 1.0
+def test_vol_target_scales_the_recorded_position(prices) -> None:
+    """A non-default ``vol_target`` must scale the position, not silently drop it.
+
+    ``signal_to_positions`` needs a rolling window of asset returns to apply
+    ``vol_target`` and raises without one; handing it the single-row series a
+    live forecast produces used to trip that error, and ``record_forecasts``
+    treats any ``ValueError`` as "skip this symbol". A configured vol_target
+    used to mean every recorded forecast for every symbol vanished.
+    """
+    frame = prices["AAA"]
+    flat_config = ExperimentConfig(
+        features=FeatureConfig(horizon=5),
+        backtest=BacktestConfig(cost_bps=2.0, slippage_bps=3.0),
+    )
+    targeted_config = ExperimentConfig(
+        features=FeatureConfig(horizon=5),
+        backtest=BacktestConfig(cost_bps=2.0, slippage_bps=3.0, vol_target=0.1, vol_lookback=20),
+    )
+
+    unscaled = record_forecasts({"AAA": frame}, "ridge", flat_config)[0]
+    scaled = record_forecasts({"AAA": frame}, "ridge", targeted_config)[0]
+
+    assert scaled.signal == pytest.approx(unscaled.signal)
+
+    returns = frame["close"].astype(float).pct_change().fillna(0.0)
+    annualised = returns.rolling(20, min_periods=20).std(ddof=1) * math.sqrt(TRADING_DAYS_PER_YEAR)
+    expected = float(np.clip(unscaled.position * (0.1 / annualised.iloc[-1]), -1.0, 1.0))
+    assert scaled.position == pytest.approx(expected)
+
+
+def test_vol_target_leaves_a_warmed_up_symbol_flat_until_its_own_warm_up(prices) -> None:
+    """A vol_lookback longer than the available history means unknown volatility."""
+    frame = prices["AAA"]
+    config = ExperimentConfig(
+        features=FeatureConfig(horizon=5),
+        backtest=BacktestConfig(vol_target=0.1, vol_lookback=len(frame) + 10),
+    )
+
+    forecast = record_forecasts({"AAA": frame}, "ridge", config)[0]
+
+    assert forecast.position == 0.0
 
 
 def test_a_symbol_too_short_to_fit_is_skipped_not_raised(prices, journal_config) -> None:
@@ -135,6 +177,69 @@ def test_every_registered_model_can_be_recorded(prices, journal_config) -> None:
     for name in ("ridge", "random_forest", "logistic", "momentum"):
         recorded = record_forecasts({"AAA": prices["AAA"]}, name, journal_config)
         assert len(recorded) == 1 and recorded[0].model == name
+
+
+def test_vol_target_is_honoured_not_silently_skipped(prices, journal_config) -> None:
+    """Before this fix, setting `vol_target` here dropped every symbol silently.
+
+    `signal_to_positions` raises when `vol_target` is set without
+    `asset_returns`, and `record_forecasts` swallows that raise in its
+    per-symbol ``except (ValueError, ...)`` - so a vol-targeted journal
+    config looked identical to a healthy universe with nothing to record.
+    """
+    config = ExperimentConfig(
+        features=journal_config.features,
+        backtest=BacktestConfig(
+            cost_bps=2.0, slippage_bps=3.0, vol_target=0.10, vol_lookback=20, max_leverage=3.0
+        ),
+    )
+
+    forecasts = record_forecasts({"AAA": prices["AAA"]}, "momentum", config)
+
+    assert len(forecasts) == 1
+    forecast = forecasts[0]
+
+    # The position must match sizing the signal by the symbol's own trailing
+    # volatility over its full history, exactly as the backtest would.
+    returns = simple_returns(prices["AAA"]["close"].astype(float))
+    expected_signal = pd.Series(0.0, index=returns.index)
+    expected_signal.loc[forecast.asof_date] = forecast.signal
+    expected_position = signal_to_positions(
+        expected_signal, config.backtest, asset_returns=returns
+    ).loc[forecast.asof_date]
+
+    assert forecast.position == pytest.approx(expected_position)
+    assert 0.0 < abs(forecast.position) <= config.backtest.max_leverage
+
+
+def test_vol_target_sizes_two_symbols_by_their_own_volatility(journal_config) -> None:
+    """Per-symbol sizing, not one flat size for the whole universe.
+
+    A quiet symbol and a symbol scaled up to be much noisier should not end
+    up trading the same size once `vol_target` is honoured, even with an
+    identical model and signal-generating process.
+    """
+    calm = generate_ohlcv(n_days=700, seed=11)
+    # Scale log returns (not price levels) so the resulting series is exactly
+    # 5x as volatile, then flatten OHLC to that close - the bar shape carries
+    # no volatility information here, only the day-to-day return does.
+    log_returns = np.log(calm["close"].astype(float)).diff().fillna(0.0)
+    scaled_close = float(calm["close"].iloc[0]) * np.exp((log_returns * 5.0).cumsum())
+    loud = calm.copy()
+    for column in ("open", "high", "low", "close"):
+        loud[column] = scaled_close
+
+    config = ExperimentConfig(
+        features=journal_config.features,
+        backtest=BacktestConfig(
+            cost_bps=2.0, slippage_bps=3.0, vol_target=0.10, vol_lookback=20, max_leverage=10.0
+        ),
+    )
+    forecasts = record_forecasts({"CALM": calm, "LOUD": loud}, "momentum", config)
+    by_symbol = {f.symbol: f for f in forecasts}
+
+    assert set(by_symbol) == {"CALM", "LOUD"}
+    assert abs(by_symbol["LOUD"].position) < abs(by_symbol["CALM"].position)
 
 
 # --------------------------------------------------------------------------- #
@@ -246,6 +351,9 @@ def test_costs_are_charged_on_the_change_in_position(tmp_path: Path, prices) -> 
     # 0 -> +1 (1 unit), +1 -> -1 (2), -1 -> +1 (2), then no change (0).
     assert costs == [10e-4, 20e-4, 20e-4, 0.0]
 
+    turnover = pd.concat([result.scored["turnover"], result.pending["turnover"]]).tolist()
+    assert turnover == [1.0, 2.0, 2.0, 0.0]
+
 
 def test_pnl_is_position_times_return_less_cost(daily_journal, prices, journal_config) -> None:
     result = score_journal(load_journal(daily_journal), prices, journal_config)
@@ -279,6 +387,8 @@ def test_metrics_and_per_symbol_breakdown(daily_journal, prices, journal_config)
     assert metrics["n_symbols"] == 2
     assert 0.0 <= metrics["hit_rate"] <= 1.0
     assert metrics["total_pnl"] == pytest.approx(result.scored["pnl"].sum())
+    expected_turnover = result.scored["turnover"].mean() * TRADING_DAYS_PER_YEAR
+    assert metrics["annual_turnover"] == pytest.approx(expected_turnover)
 
     per_symbol = result.by_symbol()
     assert set(per_symbol.index) == {"AAA", "BBB"}
@@ -341,6 +451,7 @@ def _fake_scored(n: int, hits: list[bool]) -> pd.DataFrame:
             "signal": position,
             "position": position,
             "close": 100.0,
+            "turnover": 0.0,
             "cost": 0.0,
             "realised_return": realised,
             "pnl": position * realised,
