@@ -314,7 +314,25 @@ def record_forecasts(
             if live.empty:
                 continue
             latest = live.iloc[[-1]]
+            asof = latest.index[-1]
             signal = float(np.asarray(model.predict(latest), dtype=float).ravel()[0])
+
+            # signal_to_positions needs a real trailing-volatility window to
+            # honour vol_target, not just the single date being forecast: a
+            # one-row signal series reindexes the return history down to that
+            # same row and the rolling window comes back all-NaN, which silently
+            # sizes every forecast to zero (or raises, since vol_target requires
+            # asset_returns). Carrying the symbol's own price history as flat
+            # (zero-signal) history alongside the live forecast gives the vol
+            # scaler the same lookback it would see inside a backtest, while
+            # only the final row - the one actually being recorded - is used.
+            signal_series = pd.Series(0.0, index=ohlcv.index)
+            signal_series.loc[asof] = signal
+            asset_returns = simple_returns(ohlcv["close"].astype(float))
+            position = float(
+                signal_to_positions(
+                    signal_series, config.backtest, asset_returns=asset_returns
+                ).loc[asof]
             position = _size_position(signal, latest.index[-1], ohlcv, config.backtest)
 
             # Sized over the symbol's own trailing volatility, honouring
