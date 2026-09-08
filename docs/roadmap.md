@@ -9,6 +9,16 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Now
 
+- [x] **Per-symbol position sizing in the journal.** `record_forecasts` fed
+  `signal_to_positions` a one-row signal series, so the trailing-volatility
+  window `vol_target` needs came back empty and the resulting `ValueError`
+  was swallowed by the per-symbol `except` - every forecast recorded at full,
+  unscaled size whenever `--vol-target` was set, silently. Fixed by carrying
+  the symbol's own price history alongside the live forecast so the vol
+  scaler sees the same lookback it would inside a backtest.
+- [ ] **Turnover in the journal report.** The backtest treats turnover as a
+  headline number; the journal does not report it at all, so the live cost drag
+  is invisible.
 - [x] **Per-symbol position sizing in the journal.** `record_forecasts` now
   sizes each forecast by the symbol's own trailing volatility when
   `BacktestConfig.vol_target` is set, the same way the backtest does. It
@@ -21,6 +31,11 @@ Keep each item small enough to land in one reviewed pull request.
   counts every recorded forecast, matured or not, since a position pays for
   flipping the day it flips rather than once its horizon elapses - waiting
   on `scored` would report nothing for weeks after the journal starts.
+- [x] **Turnover in the journal report.** `score_journal` now records each
+  row's raw position change as `turnover`, and `ScoreResult.metrics()` reports
+  `annual_turnover` - the same annualised-notional figure the backtest treats
+  as a headline number - alongside hit rate and IC in the journal report and
+  the CLI summary.
 
 ## Next
 
@@ -56,6 +71,12 @@ Keep each item small enough to land in one reviewed pull request.
 - [x] Forecast journal, live-vs-backtest gap, and the daily price workflow. (#4)
 - [x] Rolling hit_rate_z over the journal's timeline, so a decay shows *when*
   it started rather than only that it happened in aggregate.
+- [x] Per-symbol position sizing in the journal, honouring
+  `BacktestConfig.vol_target` the same way the backtest does. Also fixed a
+  latent bug this exposed: a configured `vol_target` made every recorded
+  forecast silently vanish, because sizing a lone-row signal series raised
+  `ValueError` for lack of a returns window, and `record_forecasts` treats any
+  `ValueError` as "skip this symbol".
 
 ## Rejected, and why
 

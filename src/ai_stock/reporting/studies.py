@@ -600,6 +600,7 @@ def render_journal_report(
                 "mean_pnl",
                 "total_pnl",
                 "live_sharpe",
+                "annual_turnover",
                 "n_symbols",
                 "span_days",
                 "live_annual_turnover",
@@ -616,6 +617,10 @@ def render_journal_report(
             "horizon the per-forecast returns overlap, so its standard error is understated.",
             "`live_annual_turnover` counts every recorded forecast, matured or not - a "
             "position pays for flipping the day it flips, not once its horizon elapses.",
+            "`annual_turnover` is the same annualised traded-notional measure the backtest "
+            "reports. Multiply it by the cost in bps to see the yearly cost drag this "
+            "journal has actually paid - `total_pnl` already nets it out, but turnover is "
+            "what makes that drag visible on its own.",
         ]
     )
 

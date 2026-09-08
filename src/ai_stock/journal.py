@@ -18,12 +18,14 @@ inspected without this package.
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from ai_stock.backtest.engine import signal_to_positions, simple_returns, trailing_volatility
+from ai_stock.config import TRADING_DAYS_PER_YEAR, BacktestConfig, ExperimentConfig
 from ai_stock.backtest.engine import signal_to_positions, simple_returns
 from ai_stock.config import TRADING_DAYS_PER_YEAR, ExperimentConfig
 from ai_stock.data.loaders import validate_ohlcv
@@ -140,6 +142,7 @@ class ScoreResult:
                 "mean_pnl",
                 "total_pnl",
                 "live_sharpe",
+                "annual_turnover",
                 "n_symbols",
                 "span_days",
                 "live_annual_turnover",
@@ -183,6 +186,11 @@ class ScoreResult:
             else float("nan")
         )
         span = pd.to_datetime(frame["asof_date"])
+        # Mirrors the backtest's `annual_turnover`: mean traded notional per
+        # forecast, annualised by the number of trading days in a year. Each
+        # symbol is recorded at most once per trading day, so this is on the
+        # same footing as the backtest's mean-per-bar figure.
+        annual_turnover = float(frame["turnover"].mean() * TRADING_DAYS_PER_YEAR)
         return {
             "n_scored": float(len(frame)),
             "n_pending": float(len(self.pending)),
@@ -192,6 +200,7 @@ class ScoreResult:
             "mean_pnl": float(np.mean(pnl)),
             "total_pnl": float(np.sum(pnl)),
             "live_sharpe": sharpe,
+            "annual_turnover": annual_turnover,
             "n_symbols": float(frame["symbol"].nunique()),
             "span_days": float((span.max() - span.min()).days),
             "live_annual_turnover": empty["live_annual_turnover"],
@@ -266,6 +275,35 @@ MIN_TRAIN_ROWS = 250
 """Labelled bars a symbol needs before its forecast is worth recording."""
 
 
+def _size_position(
+    signal: float, asof: pd.Timestamp, ohlcv: pd.DataFrame, config: BacktestConfig
+) -> float:
+    """Size one forecast exactly as the backtest would size its last bar.
+
+    ``signal_to_positions`` needs a rolling window of asset returns to apply
+    ``vol_target``, which the single-row series a live forecast produces
+    cannot supply. This instead computes trailing volatility from the
+    symbol's full price history up to ``asof`` - causal by construction,
+    since every input predates the forecast - and applies the same scaling
+    :func:`signal_to_positions` uses on its final bar. Without this, a
+    non-default ``vol_target`` made every recorded position silently 0: the
+    single-row call raised ``ValueError`` for lack of ``asset_returns``, and
+    ``record_forecasts`` treats that as "skip this symbol".
+    """
+    unscaled = config if config.vol_target is None else replace(config, vol_target=None)
+    base = float(signal_to_positions(pd.Series([signal], index=[asof]), unscaled).iloc[0])
+    if config.vol_target is None:
+        return base
+
+    asset_returns = simple_returns(ohlcv["close"].astype(float))
+    realised = trailing_volatility(asset_returns, config.vol_lookback)
+    latest_vol = realised.get(asof, float("nan"))
+    if not (latest_vol > 0):  # warm-up, or a flat/degenerate price series
+        return 0.0
+    scaler = config.vol_target / latest_vol
+    return float(np.clip(base * scaler, -config.max_leverage, config.max_leverage))
+
+
 def record_forecasts(
     universe: dict[str, pd.DataFrame],
     model_name: str = "random_forest",
@@ -309,7 +347,26 @@ def record_forecasts(
             if live.empty:
                 continue
             latest = live.iloc[[-1]]
+            asof = latest.index[-1]
             signal = float(np.asarray(model.predict(latest), dtype=float).ravel()[0])
+
+            # signal_to_positions needs a real trailing-volatility window to
+            # honour vol_target, not just the single date being forecast: a
+            # one-row signal series reindexes the return history down to that
+            # same row and the rolling window comes back all-NaN, which silently
+            # sizes every forecast to zero (or raises, since vol_target requires
+            # asset_returns). Carrying the symbol's own price history as flat
+            # (zero-signal) history alongside the live forecast gives the vol
+            # scaler the same lookback it would see inside a backtest, while
+            # only the final row - the one actually being recorded - is used.
+            signal_series = pd.Series(0.0, index=ohlcv.index)
+            signal_series.loc[asof] = signal
+            asset_returns = simple_returns(ohlcv["close"].astype(float))
+            position = float(
+                signal_to_positions(
+                    signal_series, config.backtest, asset_returns=asset_returns
+                ).loc[asof]
+            position = _size_position(signal, latest.index[-1], ohlcv, config.backtest)
 
             # Sized over the symbol's own trailing volatility, honouring
             # `BacktestConfig.vol_target` exactly as the backtest does - a
@@ -372,7 +429,9 @@ def score_journal(
     cost_rate = config.backtest.total_cost_bps * _BPS
 
     if journal.empty:
-        empty = pd.DataFrame(columns=[*JOURNAL_COLUMNS, "cost", "realised_return", "pnl"])
+        empty = pd.DataFrame(
+            columns=[*JOURNAL_COLUMNS, "turnover", "cost", "realised_return", "pnl"]
+        )
         return ScoreResult(
             scored=empty,
             pending=empty.drop(columns=["realised_return", "pnl"]),
@@ -386,7 +445,8 @@ def score_journal(
     # Cost is charged on the change from the position previously held in that
     # symbol, which is what the journal's own history says it was.
     previous = frame.groupby(["symbol", "model"])["position"].shift(1).fillna(0.0)
-    frame["cost"] = (frame["position"] - previous).abs() * cost_rate
+    frame["turnover"] = (frame["position"] - previous).abs()
+    frame["cost"] = frame["turnover"] * cost_rate
 
     realised: list[float | None] = []
     for row in frame.itertuples(index=False):
