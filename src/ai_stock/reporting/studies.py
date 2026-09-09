@@ -11,7 +11,7 @@ import pandas as pd
 
 from ai_stock.config import ExperimentConfig
 from ai_stock.journal import ScoreResult
-from ai_stock.pipeline import ModelRun, ScreenResult, SimulationBundle
+from ai_stock.pipeline import ModelRun, ScreenResult, SimulationBundle, deflated_sharpe_ratios
 from ai_stock.reporting.report import (
     Report,
     ascii_bars,
@@ -41,6 +41,7 @@ _RANKING_COLUMNS: tuple[tuple[str, str, bool], ...] = (
     ("max_drawdown", "max DD", True),
     ("annual_turnover", "turnover", False),
     ("excess_sharpe", "vs B&H", False),
+    ("deflated_sharpe", "deflated Sharpe", False),
 )
 
 _SUMMARY_KEYS = (
@@ -94,18 +95,29 @@ def _setup_bullets(config: ExperimentConfig, ohlcv_span: tuple[str, str], n_bars
     ]
 
 
-def summarise_run_row(run: ModelRun) -> list[str]:
-    """One ranking-table row for ``run``."""
-    metrics = run.metrics()
+def summarise_run_row(run: ModelRun, extra: dict[str, float] | None = None) -> list[str]:
+    """One ranking-table row for ``run``.
+
+    ``extra`` supplies metrics that depend on the other runs it is being
+    compared against (e.g. `deflated_sharpe`), so they cannot live on
+    ``run.metrics()`` itself.
+    """
+    metrics = {**run.metrics(), **(extra or {})}
     return [
         run.name,
         *(format_number(metrics.get(key), percent=percent) for key, _, percent in _RANKING_COLUMNS),
     ]
 
 
-def _ranking_table(runs: list[ModelRun]) -> tuple[list[str], list[list[str]]]:
+def _ranking_table(
+    runs: list[ModelRun], deflated: dict[str, float]
+) -> tuple[list[str], list[list[str]]]:
     headers = ["model", *(header for _, header, _ in _RANKING_COLUMNS)]
-    return headers, [summarise_run_row(run) for run in runs]
+    rows = [
+        summarise_run_row(run, extra={"deflated_sharpe": deflated.get(run.name, float("nan"))})
+        for run in runs
+    ]
+    return headers, rows
 
 
 def _equity_chart(runs: list[ModelRun], *, limit: int = 3) -> str:
@@ -223,8 +235,14 @@ def render_comparison_report(runs: list[ModelRun], config: ExperimentConfig) -> 
     report.heading("Setup").bullets(_setup_bullets(config, span, len(index)))
 
     report.heading("Ranking")
-    headers, rows = _ranking_table(runs)
+    headers, rows = _ranking_table(runs, deflated_sharpe_ratios(runs))
     report.table(headers, rows)
+    report.text(
+        f"`deflated Sharpe` corrects `probabilistic_sharpe` for having tried "
+        f"{len(runs)} model(s) here and kept the best: it is the probability the "
+        "true Sharpe beats what the best of that many skill-less attempts would "
+        "show by chance, not just zero (Bailey & Lopez de Prado, 2014)."
+    )
 
     report.heading("Equity curves (top 3)")
     report.code_block(_equity_chart(runs))
@@ -248,7 +266,15 @@ def render_comparison_report(runs: list[ModelRun], config: ExperimentConfig) -> 
         )
     )
 
-    report.heading("How to read this").bullets(_reading_notes())
+    report.heading("How to read this").bullets(
+        [
+            *_reading_notes(),
+            "**deflated Sharpe** only knows about the models compared in this one run. "
+            "Re-running `compare` with a different model list, feature set or window and "
+            "keeping whichever run looks best reintroduces the same selection bias one "
+            "level up - it has no way to see across runs.",
+        ]
+    )
     report.heading("Caveats").bullets(_caveats())
     return report.render()
 

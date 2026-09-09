@@ -17,6 +17,7 @@ from ai_stock.backtest.engine import BacktestResult, run_backtest
 from ai_stock.config import ExperimentConfig, SimulationConfig, SyntheticConfig
 from ai_stock.data.loaders import load_csv, load_yfinance, save_csv
 from ai_stock.data.synthetic import generate_ohlcv
+from ai_stock.evaluation.metrics import deflated_sharpe_ratio, sharpe_ratio
 from ai_stock.evaluation.multiple_testing import (
     benjamini_hochberg,
     bonferroni_threshold,
@@ -39,6 +40,7 @@ __all__ = [
     "ScreenResult",
     "SimulationBundle",
     "compare_models",
+    "deflated_sharpe_ratios",
     "load_prices",
     "load_universe",
     "run_model",
@@ -135,6 +137,31 @@ def compare_models(
         return float("-inf") if pd.isna(value) else float(value)
 
     return sorted(runs, key=key, reverse=True)
+
+
+def deflated_sharpe_ratios(runs: list[ModelRun]) -> dict[str, float]:
+    """Deflated Sharpe ratio for each of several models compared on identical folds.
+
+    Comparing models and reporting the best one's Sharpe has the same
+    multiple-testing problem `screen_universe` corrects for across symbols:
+    the models tried are the trials, so the benchmark each one's Sharpe must
+    clear is the best a batch of ``len(runs)`` skill-less strategies would be
+    expected to show by chance, given how much their Sharpes actually
+    disagree. With a single run there is nothing to correct for.
+    """
+    if not runs:
+        return {}
+    trial_sharpes = np.array(
+        [sharpe_ratio(run.backtest.returns, periods_per_year=1) for run in runs]
+    )
+    finite = trial_sharpes[np.isfinite(trial_sharpes)]
+    trial_std = float(np.std(finite, ddof=1)) if len(finite) > 1 else 0.0
+    return {
+        run.name: deflated_sharpe_ratio(
+            run.backtest.returns, n_trials=len(runs), trial_sharpe_std=trial_std
+        )
+        for run in runs
+    }
 
 
 @dataclass(frozen=True)

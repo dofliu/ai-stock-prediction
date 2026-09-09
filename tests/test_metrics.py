@@ -12,6 +12,8 @@ from ai_stock.evaluation.metrics import (
     annualised_volatility,
     calmar_ratio,
     classification_metrics,
+    deflated_sharpe_ratio,
+    expected_max_sharpe,
     financial_metrics,
     information_coefficient,
     max_drawdown,
@@ -159,6 +161,37 @@ def test_probabilistic_sharpe_rises_with_track_record_length() -> None:
 
 def test_probabilistic_sharpe_needs_a_minimum_sample() -> None:
     assert np.isnan(probabilistic_sharpe_ratio(pd.Series([0.01, 0.02])))
+
+
+def test_expected_max_sharpe_is_zero_with_a_single_trial() -> None:
+    assert expected_max_sharpe(1, 0.1) == 0.0
+    assert expected_max_sharpe(50, 0.0) == 0.0
+
+
+def test_expected_max_sharpe_grows_with_trials_and_dispersion() -> None:
+    assert expected_max_sharpe(100, 0.1) > expected_max_sharpe(10, 0.1)
+    assert expected_max_sharpe(100, 0.2) > expected_max_sharpe(100, 0.1)
+
+
+def test_expected_max_sharpe_rejects_bad_inputs() -> None:
+    with pytest.raises(ValueError):
+        expected_max_sharpe(0, 0.1)
+    with pytest.raises(ValueError):
+        expected_max_sharpe(10, -0.1)
+
+
+def test_deflated_sharpe_matches_psr_with_one_trial(returns: pd.Series) -> None:
+    assert deflated_sharpe_ratio(
+        returns, n_trials=1, trial_sharpe_std=0.0
+    ) == probabilistic_sharpe_ratio(returns)
+
+
+def test_deflated_sharpe_is_never_kinder_than_psr(returns: pd.Series) -> None:
+    # More trials (or more disagreement between them) raises the bar, so the
+    # deflated verdict can only be equal to or harsher than the unconditional one.
+    plain = probabilistic_sharpe_ratio(returns)
+    deflated = deflated_sharpe_ratio(returns, n_trials=20, trial_sharpe_std=0.05)
+    assert deflated <= plain
 
 
 def test_financial_metrics_cover_returns_positions_and_risk(returns: pd.Series) -> None:

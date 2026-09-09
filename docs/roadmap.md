@@ -9,36 +9,17 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Now
 
-- [x] **Per-symbol position sizing in the journal.** `record_forecasts` now
-  sizes each forecast by the symbol's own trailing volatility when
-  `BacktestConfig.vol_target` is set, the same way the backtest does. It
-  previously called `signal_to_positions` without `asset_returns`, which
-  raises when `vol_target` is set - a raise the per-symbol `except
-  (ValueError, ...)` swallowed, so a vol-targeted config silently recorded
-  nothing for any symbol instead of erroring or scaling.
-- [x] **Turnover in the journal report.** `score_journal` now records each
-  row's raw position change as `turnover`, and `ScoreResult.metrics()` reports
-  `annual_turnover` (matured forecasts only, mirroring the backtest's
-  headline figure) alongside `live_annual_turnover` (every recorded
-  forecast, matured or not, since a position pays for flipping the day it
-  flips rather than once its horizon elapses) - both shown in the journal
-  report and the CLI summary.
-
-## Next
-
 - [ ] **Multi-asset portfolio construction.** Everything is single-asset today.
   Correlated memory names traded together are not four independent bets, and
   nothing in the framework says so.
 - [ ] **Regime-conditional evaluation.** Report metrics split by realised
   volatility tercile. A model that only works in calm markets is a different
   proposition from one that works throughout.
-- [ ] **Deflated Sharpe ratio.** `probabilistic_sharpe_ratio` corrects for
-  sample length and higher moments but not for the number of configurations
-  tried. `screen` already corrects across symbols; the same problem exists
-  across models and windows.
 - [ ] **Feature importance stability.** Importances are averaged across folds
   but their variance is never reported, so a feature that matters in one fold
   and not the next looks the same as a consistent one.
+
+## Next
 
 ## Later
 
@@ -64,6 +45,16 @@ Keep each item small enough to land in one reviewed pull request.
   forecast silently vanish, because sizing a lone-row signal series raised
   `ValueError` for lack of a returns window, and `record_forecasts` treats any
   `ValueError` as "skip this symbol".
+- [x] Turnover in the journal report: `score_journal` records each row's raw
+  position change as `turnover`, and `ScoreResult.metrics()` reports
+  `annual_turnover` (matured forecasts only) alongside `live_annual_turnover`
+  (every recorded forecast, matured or not).
+- [x] Deflated Sharpe ratio (`ai_stock.evaluation.metrics.deflated_sharpe_ratio`),
+  covering the same selection bias `screen`'s BH correction covers across
+  symbols, but across the models compared in one `compare` run. Reported as
+  `deflated_sharpe` in the comparison report, benchmarked against the Sharpe
+  the best of that many skill-less trials would show by chance rather than
+  against zero.
 
 ## Rejected, and why
 

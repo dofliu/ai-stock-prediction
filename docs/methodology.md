@@ -223,6 +223,38 @@ $$
 
 ---
 
+## 7b. Deflated Sharpe：修正「試過幾個模型」
+
+`ai_stock/evaluation/metrics.py`
+
+PSR 把觀測到的 Sharpe 拿去對照一個**固定**門檻（預設 0）。但 `compare` 一次測好幾個
+模型、`screen` 一次測好幾檔標的，選出「看起來最好」的那個，本質上與 6b 節的族群篩選
+是同一個問題，只是試的是模型或視窗，而非標的。`screen` 已經用 BH 校正了跨標的的部分；
+`compare` 呈報的 `deflated_sharpe`（Bailey & López de Prado, 2014）補上跨模型的部分：
+把 PSR 的固定門檻換成「$N$ 次無技巧的嘗試中，最好的一次期望會有多高」：
+
+$$
+\mathbb{E}[\max\{SR_n\}] \approx \hat\sigma_{SR}\left[(1-\gamma)\,\Phi^{-1}\!\left(1-\frac1N\right)
++ \gamma\,\Phi^{-1}\!\left(1-\frac1{Ne}\right)\right]
+$$
+
+其中 $N$ = 試過的模型數（`compare` 裡就是模型清單的長度）、
+$\hat\sigma_{SR}$ = 這些模型各自（單期、未年化）Sharpe 的標準差、
+$\gamma \approx 0.5772$ 為 Euler–Mascheroni 常數。把這個期望值年化後代入
+`probabilistic_sharpe_ratio` 的 `benchmark_sharpe`，就得到 `deflated_sharpe_ratio`：
+$N=1$（只試一個模型）時期望值為 0，DSR 退化為 PSR，因為沒有什麼好修正的。
+
+**修正力道有多大。** 對合成市場跑 `compare --models zero,momentum,ridge,random_forest`：
+`random_forest` 單獨看 PSR 高達 0.97，但把「同一次跑試了 4 個模型」算進去後
+DSR 降到 0.56；`ridge` 的 PSR 0.68 更是被壓到 0.10。試的模型越多、彼此 Sharpe
+差異越大，門檻就墊得越高。
+
+**這個修正只看得到當次 `compare`。** 換一批模型、換一個視窗再跑一次、
+挑看起來最好的那次結果，選擇偏誤就再乘一次——`deflated_sharpe` 不知道你跑過幾次
+`compare`，如同 `q` 值不知道你篩過幾次族群（見 6b 節）。
+
+---
+
 ## 8. 已知限制
 
 1. **選擇偏誤**：特徵集與超參數是看著這份資料挑的。walk-forward 能防止單一 fold 的
@@ -232,14 +264,18 @@ $$
 4. **重疊訊號**：$h > 1$ 時每天以最新預測更新部位，屬慣例作法，但會使有效樣本數
    小於 bar 數；`ic_fold_t` 的自由度因此偏樂觀。
 5. **合成 ≠ 真實**：能還原植入的邊際只證明管線正確，不代表真實市場存在該邊際。
-6. **FDR 校正只涵蓋單次篩選**：用不同模型或不同視窗把同一族群反覆篩過，
-   選擇偏誤會再乘一次，而 `q` 值並不知道你跑過幾輪。
+6. **FDR 與 deflated Sharpe 都只涵蓋單次跑法**：`screen` 的 `q` 值涵蓋跨標的的選擇，
+   `compare` 的 `deflated_sharpe` 涵蓋跨模型的選擇，但兩者都只看得到當次那一輪。
+   反覆用不同模型、不同視窗、不同族群再跑一次，選擇偏誤會再乘一次，沒有任何一個
+   指標會知道你總共跑了幾輪。
 
 ---
 
 ## 參考
 
 - Bailey, D. & López de Prado, M. (2012). *The Sharpe Ratio Efficient Frontier.*
+- Bailey, D. & López de Prado, M. (2014). *The Deflated Sharpe Ratio: Correcting for
+  Selection Bias, Backtest Overfitting, and Non-Normality.*
 - López de Prado, M. (2018). *Advances in Financial Machine Learning.*（purging / embargo）
 - Benjamini, Y. & Hochberg, Y. (1995). *Controlling the False Discovery Rate.*
 - Politis, D. & Romano, J. (1994). *The Stationary Bootstrap.*
