@@ -114,7 +114,9 @@ def test_vol_target_scales_the_recorded_position(prices, journal_config) -> None
 
     assert forecast.position == pytest.approx(expected)
     assert abs(forecast.position) < 1.0
-def test_vol_target_scales_the_recorded_position(prices) -> None:
+
+
+def test_vol_target_scales_relative_to_the_unscaled_position(prices) -> None:
     """A non-default ``vol_target`` must scale the position, not silently drop it.
 
     ``signal_to_positions`` needs a rolling window of asset returns to apply

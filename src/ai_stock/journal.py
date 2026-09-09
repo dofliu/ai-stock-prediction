@@ -26,8 +26,6 @@ import pandas as pd
 
 from ai_stock.backtest.engine import signal_to_positions, simple_returns, trailing_volatility
 from ai_stock.config import TRADING_DAYS_PER_YEAR, BacktestConfig, ExperimentConfig
-from ai_stock.backtest.engine import signal_to_positions, simple_returns
-from ai_stock.config import TRADING_DAYS_PER_YEAR, ExperimentConfig
 from ai_stock.data.loaders import validate_ohlcv
 from ai_stock.features.builder import build_dataset, build_features
 from ai_stock.models.registry import create_model
@@ -349,41 +347,8 @@ def record_forecasts(
             latest = live.iloc[[-1]]
             asof = latest.index[-1]
             signal = float(np.asarray(model.predict(latest), dtype=float).ravel()[0])
+            position = _size_position(signal, asof, ohlcv, config.backtest)
 
-            # signal_to_positions needs a real trailing-volatility window to
-            # honour vol_target, not just the single date being forecast: a
-            # one-row signal series reindexes the return history down to that
-            # same row and the rolling window comes back all-NaN, which silently
-            # sizes every forecast to zero (or raises, since vol_target requires
-            # asset_returns). Carrying the symbol's own price history as flat
-            # (zero-signal) history alongside the live forecast gives the vol
-            # scaler the same lookback it would see inside a backtest, while
-            # only the final row - the one actually being recorded - is used.
-            signal_series = pd.Series(0.0, index=ohlcv.index)
-            signal_series.loc[asof] = signal
-            asset_returns = simple_returns(ohlcv["close"].astype(float))
-            position = float(
-                signal_to_positions(
-                    signal_series, config.backtest, asset_returns=asset_returns
-                ).loc[asof]
-            position = _size_position(signal, latest.index[-1], ohlcv, config.backtest)
-
-            # Sized over the symbol's own trailing volatility, honouring
-            # `BacktestConfig.vol_target` exactly as the backtest does - a
-            # single flat size for every symbol makes the live P&L
-            # incomparable to the backtested one whenever volatilities
-            # differ. The rolling estimate needs history *before* the asof
-            # date, so the signal is placed on the full return series rather
-            # than a lone point; only the asof row is kept.
-            asof = latest.index[-1]
-            asset_returns = simple_returns(ohlcv["close"].astype(float))
-            sized_signal = pd.Series(0.0, index=asset_returns.index)
-            sized_signal.loc[asof] = signal
-            position = float(
-                signal_to_positions(sized_signal, config.backtest, asset_returns=asset_returns).loc[
-                    asof
-                ]
-            )
             forecasts.append(
                 Forecast(
                     asof_date=asof,
