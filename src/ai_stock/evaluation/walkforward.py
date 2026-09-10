@@ -94,9 +94,32 @@ class WalkForwardResult:
     close: pd.Series
     folds: list[FoldResult] = field(default_factory=list)
     feature_importance: pd.Series | None = None
+    feature_importance_std: pd.Series | None = None
 
     def __len__(self) -> int:
         return len(self.predictions)
+
+    def feature_importance_stability(self) -> pd.DataFrame:
+        """Per-feature importance mean, dispersion and coefficient of variation.
+
+        ``feature_importance`` alone treats a feature that scores the same in
+        every fold the same as one that swings from irrelevant to dominant and
+        happens to average out the same - the two are different claims about
+        how much to trust the feature. ``cv`` (std / |mean|) makes that
+        difference visible; it is undefined (``NaN``) with fewer than two
+        folds or a mean of zero.
+        """
+        if self.feature_importance is None:
+            return pd.DataFrame(columns=["mean", "std", "cv"])
+        mean = self.feature_importance
+        std = (
+            self.feature_importance_std
+            if self.feature_importance_std is not None
+            else pd.Series(float("nan"), index=mean.index)
+        )
+        cv = std / mean.abs().replace(0.0, np.nan)
+        frame = pd.DataFrame({"mean": mean, "std": std, "cv": cv})
+        return frame.reindex(mean.abs().sort_values(ascending=False).index)
 
     def metrics(self) -> dict[str, float]:
         """Predictive metrics, pooled across folds and aggregated per fold.
@@ -329,11 +352,13 @@ def run_walk_forward(
     pooled = pooled.sort_index()
     pooled.name = f"{probe.name}_signal"
 
-    mean_importance = (
-        pd.concat(importances, axis=1).mean(axis=1).rename(f"{probe.name}_importance")
-        if importances
-        else None
-    )
+    if importances:
+        importance_frame = pd.concat(importances, axis=1)
+        mean_importance = importance_frame.mean(axis=1).rename(f"{probe.name}_importance")
+        std_importance = importance_frame.std(axis=1, ddof=1).rename(f"{probe.name}_importance_std")
+    else:
+        mean_importance = None
+        std_importance = None
 
     return WalkForwardResult(
         model_name=probe.name,
@@ -345,4 +370,5 @@ def run_walk_forward(
         close=dataset.close.reindex(pooled.index),
         folds=fold_results,
         feature_importance=mean_importance,
+        feature_importance_std=std_importance,
     )
