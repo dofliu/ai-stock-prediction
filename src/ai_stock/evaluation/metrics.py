@@ -32,6 +32,8 @@ __all__ = [
     "annualised_volatility",
     "calmar_ratio",
     "classification_metrics",
+    "deflated_sharpe_ratio",
+    "expected_max_sharpe",
     "financial_metrics",
     "information_coefficient",
     "max_drawdown",
@@ -65,6 +67,67 @@ def _aligned(
 
 def _normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _horner(coefficients: tuple[float, ...], x: float) -> float:
+    result = 0.0
+    for coefficient in coefficients:
+        result = result * x + coefficient
+    return result
+
+
+def _normal_ppf(p: float) -> float:
+    """Inverse standard normal CDF (Acklam's rational approximation, |err| < 1.15e-9)."""
+    if p <= 0.0:
+        return float("-inf")
+    if p >= 1.0:
+        return float("inf")
+
+    # Central-region coefficients.
+    a = (
+        -3.969683028665376e01,
+        2.209460984245205e02,
+        -2.759285104469687e02,
+        1.383577518672690e02,
+        -3.066479806614716e01,
+        2.506628277459239e00,
+    )
+    b = (
+        -5.447609879822406e01,
+        1.615858368580409e02,
+        -1.556989798598866e02,
+        6.680131188771972e01,
+        -1.328068155288572e01,
+        1.0,
+    )
+    # Tail coefficients.
+    c = (
+        -7.784894002430293e-03,
+        -3.223964580411365e-01,
+        -2.400758277161838e00,
+        -2.549732539343734e00,
+        4.374664141464968e00,
+        2.938163982698783e00,
+    )
+    d = (
+        7.784695709041462e-03,
+        3.224671290700398e-01,
+        2.445134137142996e00,
+        3.754408661907416e00,
+        1.0,
+    )
+    p_low = 0.02425
+    p_high = 1.0 - p_low
+
+    if p < p_low:
+        q = math.sqrt(-2.0 * math.log(p))
+        return _horner(c, q) / _horner(d, q)
+    if p <= p_high:
+        q = p - 0.5
+        r = q * q
+        return _horner(a, r) * q / _horner(b, r)
+    q = math.sqrt(-2.0 * math.log(1.0 - p))
+    return -_horner(c, q) / _horner(d, q)
 
 
 def information_coefficient(
@@ -283,6 +346,67 @@ def probabilistic_sharpe_ratio(
         return float("nan")
     statistic = (observed - target) * math.sqrt(n - 1) / math.sqrt(denominator)
     return float(_normal_cdf(statistic))
+
+
+def expected_max_sharpe(n_trials: int, trial_sharpe_std: float) -> float:
+    """Per-period Sharpe the best of ``n_trials`` skill-less attempts would show by chance.
+
+    Bailey & Lopez de Prado (2014). ``trial_sharpe_std`` is the standard
+    deviation, across the trials actually run, of their per-period
+    (non-annualised) Sharpe ratios - it stands in for the variance pure luck
+    would produce across equally-sized configurations. More trials, or more
+    disagreement between them, raises the bar the survivor must clear.
+
+    >>> expected_max_sharpe(1, 0.1)
+    0.0
+    >>> round(expected_max_sharpe(100, 0.1), 4)
+    0.2531
+    """
+    if n_trials < 1:
+        raise ValueError("n_trials must be >= 1")
+    if trial_sharpe_std < 0:
+        raise ValueError("trial_sharpe_std must be >= 0")
+    if n_trials == 1 or trial_sharpe_std < _EPS:
+        return 0.0
+    euler_mascheroni = 0.5772156649015329
+    return trial_sharpe_std * (
+        (1.0 - euler_mascheroni) * _normal_ppf(1.0 - 1.0 / n_trials)
+        + euler_mascheroni * _normal_ppf(1.0 - 1.0 / (n_trials * math.e))
+    )
+
+
+def deflated_sharpe_ratio(
+    returns: pd.Series | np.ndarray,
+    *,
+    n_trials: int,
+    trial_sharpe_std: float,
+    periods_per_year: int = TRADING_DAYS_PER_YEAR,
+) -> float:
+    """Probability the observed Sharpe is genuine, net of how many configurations were tried.
+
+    `probabilistic_sharpe_ratio` benchmarks one track record against a fixed
+    constant (zero, by default). It has no way to know that the model,
+    feature set or window it is judging was picked as the best of several
+    tried on this same data - the same selection problem `multiple_testing`
+    corrects for across symbols, here applied across models or windows on a
+    single symbol (Bailey & Lopez de Prado, 2014). This benchmarks against the
+    Sharpe pure luck would be expected to produce as the best of ``n_trials``
+    equally-sized attempts, rather than against zero.
+
+    With a single trial there is nothing to correct for, and this reduces
+    exactly to `probabilistic_sharpe_ratio`:
+
+    >>> import numpy as np
+    >>> noise = np.random.default_rng(0).normal(0.0005, 0.01, 300)
+    >>> deflated_sharpe_ratio(noise, n_trials=1, trial_sharpe_std=0.0) == (
+    ...     probabilistic_sharpe_ratio(noise)
+    ... )
+    True
+    """
+    benchmark = expected_max_sharpe(n_trials, trial_sharpe_std) * math.sqrt(periods_per_year)
+    return probabilistic_sharpe_ratio(
+        returns, benchmark_sharpe=benchmark, periods_per_year=periods_per_year
+    )
 
 
 def financial_metrics(

@@ -15,7 +15,14 @@ from ai_stock.config import (
     WalkForwardConfig,
 )
 from ai_stock.data.loaders import save_csv
-from ai_stock.pipeline import compare_models, load_prices, run_model, run_simulation
+from ai_stock.evaluation.metrics import probabilistic_sharpe_ratio
+from ai_stock.pipeline import (
+    compare_models,
+    deflated_sharpe_ratios,
+    load_prices,
+    run_model,
+    run_simulation,
+)
 
 
 @pytest.fixture(scope="module")
@@ -76,6 +83,27 @@ def test_compare_models_can_rank_by_another_metric(ohlcv, config) -> None:
 def test_compare_models_rejects_an_empty_list(ohlcv, config) -> None:
     with pytest.raises(ValueError, match="empty"):
         compare_models(ohlcv, [], config)
+
+
+def test_deflated_sharpe_ratios_covers_every_run(ohlcv, config) -> None:
+    runs = compare_models(ohlcv, ["zero", "momentum", "ridge"], config)
+    deflated = deflated_sharpe_ratios(runs)
+
+    assert set(deflated) == {run.name for run in runs}
+    assert all(0.0 <= value <= 1.0 or pd.isna(value) for value in deflated.values())
+
+
+def test_deflated_sharpe_ratios_needs_no_peers_for_a_single_run(ohlcv, config) -> None:
+    run = run_model(ohlcv, "ridge", config)
+    deflated = deflated_sharpe_ratios([run])
+
+    assert deflated["ridge"] == pytest.approx(
+        probabilistic_sharpe_ratio(run.backtest.returns), nan_ok=True
+    )
+
+
+def test_deflated_sharpe_ratios_of_an_empty_list_is_empty() -> None:
+    assert deflated_sharpe_ratios([]) == {}
 
 
 def test_run_simulation_returns_a_complete_bundle(ohlcv, config) -> None:

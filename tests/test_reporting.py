@@ -154,6 +154,7 @@ def test_comparison_report_lists_every_model(ohlcv, report_config) -> None:
         assert name in rendered
     assert "## Ranking" in rendered
     assert "buy & hold" in rendered
+    assert "deflated Sharpe" in rendered
 
 
 def test_comparison_report_needs_at_least_one_run(report_config) -> None:
