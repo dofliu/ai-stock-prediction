@@ -209,11 +209,15 @@ def render_backtest_report(run: ModelRun, config: ExperimentConfig) -> str:
                 table[column] = table[column].dt.date.astype(str)
         report.dataframe(table)
 
-    importance = walk_forward.feature_importance
-    if importance is not None and not importance.empty:
-        report.heading("Feature importance (mean across folds)")
-        top = importance.reindex(importance.abs().sort_values(ascending=False).index).head(12)
-        report.dataframe(top.to_frame("importance"))
+    stability = walk_forward.feature_importance_stability()
+    if not stability.empty:
+        report.heading("Feature importance (mean, std and cv across folds)")
+        report.dataframe(stability.head(12))
+        report.text(
+            "`cv` (std / |mean|) is undefined with a single fold. A feature with a "
+            "high `cv` swings between folds and should be trusted less than its mean "
+            "alone suggests, even if another feature with the same mean is stable."
+        )
 
     report.heading("How to read this").bullets(_reading_notes())
     report.heading("Caveats").bullets(_caveats())

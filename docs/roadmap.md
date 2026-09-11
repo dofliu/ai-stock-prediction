@@ -15,9 +15,6 @@ Keep each item small enough to land in one reviewed pull request.
 - [ ] **Regime-conditional evaluation.** Report metrics split by realised
   volatility tercile. A model that only works in calm markets is a different
   proposition from one that works throughout.
-- [ ] **Feature importance stability.** Importances are averaged across folds
-  but their variance is never reported, so a feature that matters in one fold
-  and not the next looks the same as a consistent one.
 
 ## Next
 
@@ -55,6 +52,12 @@ Keep each item small enough to land in one reviewed pull request.
   `deflated_sharpe` in the comparison report, benchmarked against the Sharpe
   the best of that many skill-less trials would show by chance rather than
   against zero.
+- [x] Feature importance stability: `WalkForwardResult.feature_importance_std`
+  and `feature_importance_stability()` report each feature's std and
+  coefficient of variation across folds alongside its mean, so a feature that
+  swings from irrelevant to dominant between folds no longer looks the same
+  as one that is consistently useful. Surfaced in the backtest report as a
+  mean/std/cv table.
 
 ## Rejected, and why
 

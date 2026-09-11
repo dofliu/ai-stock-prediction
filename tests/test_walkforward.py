@@ -157,6 +157,31 @@ def test_feature_importance_is_averaged_across_folds(dataset, walk_forward_confi
     assert list(result.feature_importance.index) == dataset.feature_names
 
 
+def test_feature_importance_stability_reports_dispersion_across_folds(
+    dataset, walk_forward_config
+) -> None:
+    result = run_walk_forward(dataset, "ridge", walk_forward_config)
+    assert len(result.folds) > 1  # otherwise std is trivially NaN and proves nothing
+
+    assert result.feature_importance_std is not None
+    assert list(result.feature_importance_std.index) == dataset.feature_names
+    assert (result.feature_importance_std.dropna() >= 0).all()
+
+    stability = result.feature_importance_stability()
+    assert list(stability.columns) == ["mean", "std", "cv"]
+    assert set(stability.index) == set(dataset.feature_names)
+    # Ranked by |mean| descending, same order the report displays.
+    assert list(stability["mean"].abs()) == sorted(stability["mean"].abs(), reverse=True)
+
+
+def test_feature_importance_stability_is_empty_without_importances(
+    dataset, walk_forward_config
+) -> None:
+    result = run_walk_forward(dataset, CountingModel, walk_forward_config)
+    assert result.feature_importance is None
+    assert result.feature_importance_stability().empty
+
+
 def test_unknown_model_name_is_rejected(dataset, walk_forward_config) -> None:
     with pytest.raises(ValueError, match="unknown model"):
         run_walk_forward(dataset, "does_not_exist", walk_forward_config)
