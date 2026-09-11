@@ -219,6 +219,22 @@ def render_backtest_report(run: ModelRun, config: ExperimentConfig) -> str:
             "alone suggests, even if another feature with the same mean is stable."
         )
 
+    regimes = walk_forward.regime_metrics()
+    if not regimes.empty:
+        report.heading("Performance by volatility regime")
+        columns = [
+            c
+            for c in ("mean_realised_vol", "n", "ic_pearson", "directional_accuracy", "accuracy")
+            if c in regimes
+        ]
+        report.dataframe(regimes[columns])
+        report.text(
+            "Regimes are trailing realised-volatility terciles of `close` (`low` to "
+            "`high`), lowest to highest. A model whose `ic_pearson` only holds up in "
+            "`low` is a different, weaker proposition than one that holds across all "
+            "three."
+        )
+
     report.heading("How to read this").bullets(_reading_notes())
     report.heading("Caveats").bullets(_caveats())
     return report.render()

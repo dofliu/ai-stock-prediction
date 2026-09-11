@@ -8,6 +8,7 @@ import pytest
 
 from ai_stock.config import WalkForwardConfig
 from ai_stock.evaluation.walkforward import (
+    WalkForwardResult,
     WalkForwardSplitter,
     run_walk_forward,
 )
@@ -180,6 +181,43 @@ def test_feature_importance_stability_is_empty_without_importances(
     result = run_walk_forward(dataset, CountingModel, walk_forward_config)
     assert result.feature_importance is None
     assert result.feature_importance_stability().empty
+
+
+def test_regime_metrics_splits_into_ascending_volatility_terciles(
+    dataset, walk_forward_config
+) -> None:
+    result = run_walk_forward(dataset, "ridge", walk_forward_config)
+    regimes = result.regime_metrics()
+
+    assert list(regimes.index) == ["low", "mid", "high"]
+    assert (regimes["n"] > 0).all()
+    # Terciles are ordered by construction: mean realised vol strictly increases.
+    means = regimes["mean_realised_vol"].to_numpy()
+    assert (np.diff(means) > 0).all()
+
+
+def _flat_walk_forward_result(n: int = 60) -> WalkForwardResult:
+    """A hand-built result whose ``close`` never moves, so volatility is zero throughout."""
+    index = pd.bdate_range("2024-01-01", periods=n, name="date")
+    zeros = pd.Series(0.0, index=index)
+    return WalkForwardResult(
+        model_name="flat",
+        is_classifier=False,
+        signal_units="return",
+        predictions=zeros,
+        forward_return=zeros,
+        direction=zeros,
+        close=pd.Series(100.0, index=index),
+    )
+
+
+def test_regime_metrics_is_empty_when_volatility_is_degenerate() -> None:
+    assert _flat_walk_forward_result().regime_metrics().empty
+
+
+def test_regime_metrics_is_empty_without_enough_history_for_the_window() -> None:
+    result = _flat_walk_forward_result(n=5)
+    assert result.regime_metrics(window=20).empty
 
 
 def test_unknown_model_name_is_rejected(dataset, walk_forward_config) -> None:

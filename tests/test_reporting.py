@@ -140,6 +140,7 @@ def test_backtest_report_contains_the_key_sections(ohlcv, report_config) -> None
         "## Equity curve",
         "## Per-fold stability",
         "## Feature importance",
+        "## Performance by volatility regime",
         "## Caveats",
     ):
         assert section in rendered

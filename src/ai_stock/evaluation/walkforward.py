@@ -36,6 +36,7 @@ import pandas as pd
 from ai_stock.config import WalkForwardConfig
 from ai_stock.evaluation.metrics import classification_metrics, regression_metrics
 from ai_stock.features.builder import Dataset
+from ai_stock.features.indicators import realised_volatility
 from ai_stock.models.base import Model
 
 __all__ = [
@@ -120,6 +121,55 @@ class WalkForwardResult:
         cv = std / mean.abs().replace(0.0, np.nan)
         frame = pd.DataFrame({"mean": mean, "std": std, "cv": cv})
         return frame.reindex(mean.abs().sort_values(ascending=False).index)
+
+    def regime_metrics(self, *, window: int = 20, n_regimes: int = 3) -> pd.DataFrame:
+        """Predictive metrics split by trailing realised-volatility regime.
+
+        A model evaluated only in aggregate can look uniformly mediocre while
+        actually being sharp in calm markets and useless (or harmful) in
+        turbulent ones - or the reverse. That is a different, more decision-
+        useful claim than a single pooled number, so this buckets the pooled
+        out-of-sample predictions into ``n_regimes`` groups of ``close``'s
+        trailing realised volatility (lowest to highest) and reports the same
+        predictive metrics :meth:`metrics` does, per bucket.
+
+        Volatility is trailing-only (no look-ahead) but is computed on the
+        already out-of-sample ``close`` series, so a bucket boundary can fall
+        near a fold edge; this is a descriptive grouping for the report, not a
+        feature fed back into the model. Returns an empty frame if there are
+        too few distinct volatility values to form ``n_regimes`` buckets.
+        """
+        vol = realised_volatility(self.close, window, annualise=False)
+        vol = vol.reindex(self.predictions.index)
+        valid = vol.dropna()
+        if valid.empty:
+            return pd.DataFrame()
+        try:
+            buckets = pd.qcut(valid, n_regimes, duplicates="drop")
+        except ValueError:
+            return pd.DataFrame()
+
+        categories = buckets.cat.categories
+        if categories.empty:
+            return pd.DataFrame()
+        names = (
+            ["low", "mid", "high"]
+            if len(categories) == 3
+            else [f"q{i + 1}" for i in range(len(categories))]
+        )
+        codes = pd.Series(buckets.cat.codes, index=valid.index)
+
+        rows = []
+        for code, name in enumerate(names):
+            idx = codes[codes == code].index
+            if len(idx) == 0:
+                continue
+            predicted = self.predictions.reindex(idx)
+            summary = regression_metrics(self.forward_return.reindex(idx), predicted)
+            summary.update(classification_metrics(self.direction.reindex(idx), predicted))
+            summary["mean_realised_vol"] = float(valid.reindex(idx).mean())
+            rows.append({"regime": name, **summary})
+        return pd.DataFrame(rows).set_index("regime")
 
     def metrics(self) -> dict[str, float]:
         """Predictive metrics, pooled across folds and aggregated per fold.
