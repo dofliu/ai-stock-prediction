@@ -12,9 +12,6 @@ Keep each item small enough to land in one reviewed pull request.
 - [ ] **Multi-asset portfolio construction.** Everything is single-asset today.
   Correlated memory names traded together are not four independent bets, and
   nothing in the framework says so.
-- [ ] **Regime-conditional evaluation.** Report metrics split by realised
-  volatility tercile. A model that only works in calm markets is a different
-  proposition from one that works throughout.
 
 ## Next
 
@@ -58,6 +55,13 @@ Keep each item small enough to land in one reviewed pull request.
   swings from irrelevant to dominant between folds no longer looks the same
   as one that is consistently useful. Surfaced in the backtest report as a
   mean/std/cv table.
+- [x] Regime-conditional evaluation: `WalkForwardResult.regime_metrics()`
+  splits pooled out-of-sample predictions into terciles of trailing realised
+  volatility (computed causally on the full price series before folding, so
+  fold-boundary gaps cannot contaminate it) and reports IC and directional
+  accuracy within each. Surfaced in the backtest report so a model whose edge
+  only shows up in the calm tercile no longer looks the same as one that
+  holds throughout.
 
 ## Rejected, and why
 

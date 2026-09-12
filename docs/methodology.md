@@ -119,6 +119,18 @@ $$
 
 判讀以逐 fold 指標為準，慣例門檻約 $|t| > 2$。
 
+### Regime-conditional 評估
+
+`WalkForwardResult.regime_metrics()`
+
+pooled 與逐 fold 指標都把所有時期混在一起：一個只在盤整期有效、遇到高波動就失靈的
+模型，跟一個全程都穩定的模型，兩者的 `ic_fold_mean` 可能長得一模一樣，但這是完全
+不同等級的宣稱。`regime_metrics()` 依**盤前已知**的落後已實現波動度（在完整價格序列
+上算好、再對齊到 pooled 預測，因此不會被 fold 之間的 embargo 缺口污染）把樣本切成
+三等分（terciles），逐一回報 IC 與方向準確率。判讀順序與逐 fold 指標相同：三個
+regime 都為正、量級相近，才算是穩定的訊號；只有高波動 regime 撐起平均值的模型，
+遇到盤整期很可能交不出東西。
+
 ---
 
 ## 5. 回測的時序約定

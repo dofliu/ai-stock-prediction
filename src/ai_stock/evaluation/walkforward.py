@@ -35,6 +35,7 @@ import pandas as pd
 
 from ai_stock.config import WalkForwardConfig
 from ai_stock.evaluation.metrics import classification_metrics, regression_metrics
+from ai_stock.features import indicators as ind
 from ai_stock.features.builder import Dataset
 from ai_stock.models.base import Model
 
@@ -95,6 +96,8 @@ class WalkForwardResult:
     folds: list[FoldResult] = field(default_factory=list)
     feature_importance: pd.Series | None = None
     feature_importance_std: pd.Series | None = None
+    realised_volatility: pd.Series | None = None
+    """Trailing annualised volatility at each prediction, for :meth:`regime_metrics`."""
 
     def __len__(self) -> int:
         return len(self.predictions)
@@ -186,6 +189,43 @@ class WalkForwardResult:
         ]
         return pd.DataFrame(rows).set_index("fold")
 
+    def regime_metrics(self, n_bins: int = 3) -> pd.DataFrame:
+        """Predictive metrics split by realised-volatility bin (terciles by default).
+
+        A model whose information coefficient only shows up in the calm bin is
+        a materially weaker claim than one that holds across every regime -
+        pooling every bar together, as :meth:`metrics` does, cannot tell the
+        two apart. Bins are quantiles of :attr:`realised_volatility` at each
+        prediction, so each one holds roughly the same number of bars.
+        """
+        if self.realised_volatility is None:
+            return pd.DataFrame()
+        volatility = self.realised_volatility.dropna()
+        if len(volatility.unique()) < 2:
+            return pd.DataFrame()
+
+        bins = pd.qcut(volatility, min(n_bins, len(volatility.unique())), duplicates="drop")
+        labels = _regime_labels(len(bins.cat.categories))
+        bins = bins.cat.rename_categories(labels)
+
+        rows = []
+        for label in labels:
+            index = bins[bins == label].index
+            forward_return = self.forward_return.reindex(index)
+            predictions = self.predictions.reindex(index)
+            row = regression_metrics(forward_return, predictions)
+            row.update(classification_metrics(self.direction.reindex(index), predictions))
+            row["realised_vol_mean"] = float(volatility.reindex(index).mean())
+            row["regime"] = label
+            rows.append(row)
+        return pd.DataFrame(rows).set_index("regime")
+
+
+def _regime_labels(n_bins: int) -> list[str]:
+    if n_bins == 3:
+        return ["low_vol", "mid_vol", "high_vol"]
+    return [f"vol_q{i + 1}_of_{n_bins}" for i in range(n_bins)]
+
 
 class WalkForwardSplitter:
     """Generate expanding or rolling train/test folds with an embargo gap."""
@@ -270,6 +310,7 @@ def run_walk_forward(
     config: WalkForwardConfig | None = None,
     *,
     model_kwargs: dict | None = None,
+    regime_vol_window: int = 20,
 ) -> WalkForwardResult:
     """Run a full walk-forward evaluation and pool the out-of-sample forecasts.
 
@@ -284,6 +325,11 @@ def run_walk_forward(
         Fold schedule; defaults to :class:`WalkForwardConfig`.
     model_kwargs:
         Extra arguments when ``model_factory`` is given as a registry name.
+    regime_vol_window:
+        Trailing window (bars) for the realised volatility that
+        :meth:`WalkForwardResult.regime_metrics` bins predictions by. Computed
+        on ``dataset.close`` before folding, so it stays causal and free of the
+        gaps between test windows.
 
     Notes
     -----
@@ -360,6 +406,8 @@ def run_walk_forward(
         mean_importance = None
         std_importance = None
 
+    volatility = ind.realised_volatility(dataset.close, regime_vol_window).reindex(pooled.index)
+
     return WalkForwardResult(
         model_name=probe.name,
         is_classifier=probe.is_classifier,
@@ -371,4 +419,5 @@ def run_walk_forward(
         folds=fold_results,
         feature_importance=mean_importance,
         feature_importance_std=std_importance,
+        realised_volatility=volatility,
     )
