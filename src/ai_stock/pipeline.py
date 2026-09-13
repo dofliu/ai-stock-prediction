@@ -25,6 +25,7 @@ from ai_stock.evaluation.multiple_testing import (
 )
 from ai_stock.evaluation.walkforward import WalkForwardResult, run_walk_forward
 from ai_stock.features.builder import Dataset, build_dataset
+from ai_stock.portfolio import PortfolioResult, build_portfolio
 from ai_stock.simulation.monte_carlo import (
     BootstrapResult,
     PathSimulationResult,
@@ -240,6 +241,29 @@ class ScreenResult:
             and np.isfinite(entry.q_value)
             and entry.q_value <= self.alpha
         ]
+
+    def portfolio(self, *, scheme: str = "equal") -> PortfolioResult:
+        """Hold every evaluated symbol at once, and measure what that diversifies.
+
+        The ranking table scores each symbol as a standalone decision, which is
+        the one thing a portfolio is not. Sleeves that share a driver share
+        their drawdowns, so the combined risk is not the sum of the parts - see
+        :mod:`ai_stock.portfolio`.
+
+        Failed symbols are left out (they have no return stream), and so is the
+        survivor filter: a screen usually has no survivors, and the correlation
+        structure of the universe is worth knowing either way.
+        """
+        if not self.ranked:
+            raise ValueError("no evaluated symbols to combine into a portfolio")
+        entries = [entry for entry in self.ranked if entry.run]
+        return build_portfolio(
+            {entry.symbol: entry.run.backtest.returns for entry in entries},
+            asset_returns_by_symbol={
+                entry.symbol: entry.run.backtest.asset_returns for entry in entries
+            },
+            scheme=scheme,
+        )
 
     def table(self) -> pd.DataFrame:
         """Ranking table, one row per symbol that produced a result."""

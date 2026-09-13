@@ -253,3 +253,57 @@ def test_screen_report_lists_failures(universe, screen_config) -> None:
 
     assert "## Symbols that could not be evaluated" in rendered
     assert "SHORT" in rendered
+
+
+# --------------------------------------------------------------------------- #
+# Holding the screened symbols together
+# --------------------------------------------------------------------------- #
+def test_screen_portfolio_holds_every_evaluated_symbol(universe, screen_config) -> None:
+    result = screen_universe(universe, "ridge", screen_config, permutations=0)
+    portfolio = result.portfolio()
+
+    assert portfolio.symbols == [entry.symbol for entry in result.ranked]
+    assert portfolio.weights.sum() == pytest.approx(1.0)
+
+    metrics = portfolio.metrics()
+    assert metrics["n_sleeves"] == 3.0
+    assert metrics["effective_bets"] >= 1.0
+    assert metrics["n_periods"] == len(portfolio.sleeves)
+    assert np.isfinite(metrics["mean_correlation"])
+
+
+def test_screen_portfolio_excludes_symbols_that_failed(universe, screen_config) -> None:
+    mixed = {**universe, "SHORT": generate_ohlcv(n_days=120, seed=5)}
+    result = screen_universe(mixed, "ridge", screen_config, permutations=0)
+    assert "SHORT" not in result.portfolio().symbols
+
+
+def test_screen_portfolio_needs_something_to_combine(screen_config) -> None:
+    result = screen_universe(
+        {"SHORT": generate_ohlcv(n_days=120, seed=5)}, "ridge", screen_config, permutations=0
+    )
+    with pytest.raises(ValueError, match="no evaluated symbols"):
+        result.portfolio()
+
+
+def test_screen_report_says_how_many_bets_the_universe_really_is(universe, screen_config) -> None:
+    result = screen_universe(universe, "ridge", screen_config, permutations=0)
+    rendered = render_screen_report(result, screen_config)
+
+    assert "## Held together, not one at a time" in rendered
+    assert "independent bets" in rendered
+    assert "effective number of bets" in rendered
+    assert "risk_contribution" in rendered
+    assert "Sharpe if the sleeves were independent" in rendered
+    # The sleeve correlation is never shown without the shares to compare it to.
+    assert "The shares themselves correlate" in rendered
+    assert "Correlation of the shares themselves" in rendered
+
+
+def test_screen_report_survives_a_single_evaluated_symbol(universe, screen_config) -> None:
+    one = {"AAA": universe["AAA"], "SHORT": generate_ohlcv(n_days=120, seed=5)}
+    result = screen_universe(one, "ridge", screen_config, permutations=0)
+    rendered = render_screen_report(result, screen_config)
+
+    assert "## Held together, not one at a time" in rendered
+    assert "nothing here to diversify" in rendered
