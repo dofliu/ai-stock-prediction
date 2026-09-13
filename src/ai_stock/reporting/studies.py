@@ -219,6 +219,22 @@ def render_backtest_report(run: ModelRun, config: ExperimentConfig) -> str:
             "alone suggests, even if another feature with the same mean is stable."
         )
 
+    regime = walk_forward.regime_metrics()
+    if not regime.empty:
+        report.heading("Regime-conditional performance")
+        columns = [
+            c
+            for c in ("n", "realised_vol_mean", "ic_pearson", "directional_accuracy", "accuracy")
+            if c in regime
+        ]
+        report.dataframe(regime[columns])
+        report.text(
+            "Split by trailing realised-volatility tercile. A model whose edge only shows "
+            "up in the calm bin is a different, weaker claim than one that holds across "
+            "all three - pooling every bar together, as the tables above do, cannot tell "
+            "the two apart."
+        )
+
     report.heading("How to read this").bullets(_reading_notes())
     report.heading("Caveats").bullets(_caveats())
     return report.render()

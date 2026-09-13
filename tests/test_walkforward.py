@@ -8,6 +8,7 @@ import pytest
 
 from ai_stock.config import WalkForwardConfig
 from ai_stock.evaluation.walkforward import (
+    WalkForwardResult,
     WalkForwardSplitter,
     run_walk_forward,
 )
@@ -185,3 +186,46 @@ def test_feature_importance_stability_is_empty_without_importances(
 def test_unknown_model_name_is_rejected(dataset, walk_forward_config) -> None:
     with pytest.raises(ValueError, match="unknown model"):
         run_walk_forward(dataset, "does_not_exist", walk_forward_config)
+
+
+def test_regime_metrics_splits_predictions_into_volatility_terciles(
+    dataset, walk_forward_config
+) -> None:
+    result = run_walk_forward(dataset, "ridge", walk_forward_config)
+    regime = result.regime_metrics()
+
+    assert list(regime.index) == ["low_vol", "mid_vol", "high_vol"]
+    assert regime["n"].sum() == pytest.approx(len(result))
+    # Terciles of realised volatility must themselves be ordered low to high.
+    assert regime["realised_vol_mean"].is_monotonic_increasing
+
+
+def test_regime_metrics_is_empty_without_enough_volatility_variation() -> None:
+    index = pd.bdate_range("2024-01-01", periods=10, name="date")
+    constant = pd.Series(1.0, index=index)
+    result = WalkForwardResult(
+        model_name="stub",
+        is_classifier=False,
+        signal_units="return",
+        predictions=constant,
+        forward_return=constant,
+        direction=constant,
+        close=constant,
+        realised_volatility=pd.Series(0.2, index=index),
+    )
+    assert result.regime_metrics().empty
+
+
+def test_regime_metrics_is_empty_without_volatility_recorded() -> None:
+    index = pd.bdate_range("2024-01-01", periods=10, name="date")
+    constant = pd.Series(1.0, index=index)
+    result = WalkForwardResult(
+        model_name="stub",
+        is_classifier=False,
+        signal_units="return",
+        predictions=constant,
+        forward_return=constant,
+        direction=constant,
+        close=constant,
+    )
+    assert result.regime_metrics().empty
