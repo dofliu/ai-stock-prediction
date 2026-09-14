@@ -35,6 +35,7 @@ __all__ = [
     "ScoreResult",
     "append_forecasts",
     "compare_with_backtest",
+    "independent_blocks",
     "load_journal",
     "record_forecasts",
     "rolling_compare_with_backtest",
@@ -60,6 +61,59 @@ def _correlation(a: np.ndarray, b: np.ndarray) -> float:
     if len(a) < 3 or a.std() < 1e-12 or b.std() < 1e-12:
         return float("nan")
     return float(np.corrcoef(a, b)[0, 1])
+
+
+def _decided(scored: pd.DataFrame) -> pd.DataFrame:
+    """The rows that actually took a side.
+
+    A zero position is not a directional call, so it is not a trial the hit
+    rate can be right or wrong about. ``metrics()`` already excludes these
+    from ``hit_rate``; anything measuring that rate's precision has to
+    exclude them too, or it counts trials that were never made.
+    """
+    if scored.empty or "position" not in scored.columns:
+        return scored
+    return scored[scored["position"].to_numpy(float) != 0.0]
+
+
+def independent_blocks(scored: pd.DataFrame) -> int:
+    """How many non-overlapping horizon windows a set of forecasts covers.
+
+    A journal records every symbol every trading day, but a forecast with a
+    5-day horizon shares four of its five outcome days with the forecast made
+    the day before. Ten such forecasts are not ten independent bets on the
+    market; they are two, observed five times each. On top of that, forecasts
+    made on the same day across a correlated universe move together - the four
+    memory names in ``config/universe.txt`` are one cycle seen four ways.
+
+    This counts the conservative end of that range: forecasts are grouped into
+    consecutive blocks of ``horizon`` trading days, and every forecast in a
+    block - across all symbols - is treated as one observation. The count is
+    a property of the recording schedule alone, not of the returns, so there
+    is no correlation estimate here to be wrong about or to tune.
+
+    Trading days are taken from the dates the journal actually contains, which
+    is what a journal is: one row per symbol per day the market was open. A
+    universe spanning two calendars (Taipei and New York) contributes the
+    union of its trading days, which can only make the block count larger and
+    the resulting standard error smaller, so it is the generous direction.
+
+    >>> frame = pd.DataFrame(
+    ...     {
+    ...         "asof_date": pd.to_datetime(["2024-01-01"] * 2 + ["2024-01-02"] * 2),
+    ...         "horizon": 5,
+    ...     }
+    ... )
+    >>> independent_blocks(frame)
+    1
+    """
+    if scored.empty:
+        return 0
+    horizon = max(int(pd.to_numeric(scored["horizon"]).max()), 1)
+    dates = pd.to_datetime(scored["asof_date"])
+    calendar = pd.Index(np.sort(dates.unique()))
+    position = calendar.get_indexer(pd.Index(dates))
+    return int(np.unique(position // horizon).size)
 
 
 @dataclass(frozen=True)
@@ -437,21 +491,38 @@ def compare_with_backtest(
 ) -> dict[str, float]:
     """Measure the live-versus-backtest gap in units of its own sampling error.
 
-    ``hit_rate_z`` is the shortfall in live directional accuracy divided by the
-    standard error of a proportion at the live sample size. Values around zero
-    mean the live record is consistent with the backtest; a large negative
-    value is decay, or an overfitted backtest finally showing itself.
+    Both z-scores divide the same shortfall in directional accuracy by the
+    standard error of a proportion; they disagree only on how many independent
+    trials the journal has actually seen, and that disagreement is the point.
 
-    With few scored forecasts the standard error is large and the z-score is
-    close to zero *whatever* happens: read ``n_scored`` before the z.
+    - ``hit_rate_z_naive`` counts every matured forecast that took a side.
+      That is the number the journal would deserve if each forecast were an
+      independent bet, which it is not: overlapping horizons and a correlated
+      universe both mean the same market move is counted several times.
+    - ``hit_rate_z`` counts :func:`independent_blocks` instead - non-overlapping
+      windows of ``horizon`` trading days, with everything inside a window
+      treated as one observation.
+
+    The first assumes zero redundancy and the second assumes total redundancy
+    within a window, so the honest significance sits between them and the
+    journal cannot yet say where. ``hit_rate_z`` is the headline because
+    overstating a decay warning is as damaging here as missing one: a z below
+    -2 is meant to mean something.
+
+    With few scored forecasts both are close to zero *whatever* happens: read
+    ``n_independent`` before either z.
     """
     metrics = live.metrics()
-    n = metrics["n_scored"]
+    decided = _decided(live.scored)
+    n_decided = float(len(decided))
+    n_independent = float(independent_blocks(decided))
     claimed = backtest_metrics.get("directional_accuracy", float("nan"))
     observed = metrics["hit_rate"]
 
     comparison = {
-        "n_scored": n,
+        "n_scored": metrics["n_scored"],
+        "n_decided": n_decided,
+        "n_independent": n_independent,
         "backtest_directional_accuracy": float(claimed),
         "live_hit_rate": float(observed),
         "hit_rate_gap": float(observed - claimed),
@@ -459,23 +530,28 @@ def compare_with_backtest(
         "live_ic": metrics["live_ic"],
     }
 
-    if n >= 1 and np.isfinite(claimed) and np.isfinite(observed) and 0.0 < claimed < 1.0:
-        standard_error = math.sqrt(claimed * (1.0 - claimed) / n)
-        comparison["hit_rate_z"] = float((observed - claimed) / standard_error)
-    else:
-        comparison["hit_rate_z"] = float("nan")
+    comparable = np.isfinite(claimed) and np.isfinite(observed) and 0.0 < claimed < 1.0
+    spread = claimed * (1.0 - claimed) if comparable else float("nan")
+    for key, trials in (("hit_rate_z_naive", n_decided), ("hit_rate_z", n_independent)):
+        if comparable and trials >= 1:
+            comparison[key] = float((observed - claimed) / math.sqrt(spread / trials))
+        else:
+            comparison[key] = float("nan")
     return comparison
 
 
 ROLLING_COMPARISON_COLUMNS = (
     "asof_date",
     "n_scored",
+    "n_decided",
+    "n_independent",
     "backtest_directional_accuracy",
     "live_hit_rate",
     "hit_rate_gap",
     "backtest_ic",
     "live_ic",
     "hit_rate_z",
+    "hit_rate_z_naive",
 )
 
 
@@ -496,6 +572,11 @@ def rolling_compare_with_backtest(
     end-date with the columns of :func:`compare_with_backtest` plus
     ``asof_date``; empty (but correctly columned) once fewer than ``window``
     forecasts have matured.
+
+    Note that a window of 30 forecasts over a four-symbol universe spans only
+    about eight trading days, which at a 5-day horizon is two independent
+    blocks. The per-window ``hit_rate_z`` is correspondingly wide and jumpy;
+    it is a picture of *when* the gap moved, not a per-date significance test.
     """
     frame = live.scored.sort_values("asof_date").reset_index(drop=True)
     if len(frame) < window:

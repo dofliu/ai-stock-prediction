@@ -563,35 +563,63 @@ def render_screen_report(result: ScreenResult, config: ExperimentConfig) -> str:
     return report.render()
 
 
+MIN_INDEPENDENT_BLOCKS = 10
+"""Non-overlapping horizons the journal needs before any verdict is offered.
+
+Ten blocks is not a power calculation - detecting a plausible edge would take
+far more - it is the point below which the standard error is so wide that the
+verdict would be describing its own noise.
+"""
+
+
 def _decay_verdict(comparison: dict[str, float]) -> str:
     """State what the live record says about the backtest's claim."""
     n = comparison.get("n_scored", 0.0)
+    blocks = comparison.get("n_independent", 0.0)
     z = comparison.get("hit_rate_z", float("nan"))
+    naive = comparison.get("hit_rate_z_naive", float("nan"))
     if n < 30:
         return (
             f"Only {int(n)} forecast(s) have matured. That is far too few to say anything: "
             "the standard error on a hit rate this small swamps any plausible edge. "
             "Keep recording."
         )
+    if blocks < MIN_INDEPENDENT_BLOCKS:
+        return (
+            f"{int(n)} forecasts have matured, but they cover only {int(blocks)} non-overlapping "
+            f"horizon(s). Recorded daily against a {int(n)}-row journal that looks like a sample "
+            "of hundreds, but a forecast shares almost all of its outcome window with the one "
+            "before it, and the whole universe moves together on any given day. There is not yet "
+            "enough independent information for a verdict. Keep recording."
+        )
     if not np.isfinite(z):
         return (
             f"{int(n)} forecasts scored, but the backtest claim is unavailable to compare against."
         )
+    divergence = ""
+    if np.isfinite(naive) and (naive <= -2.0) and (z > -2.0):
+        divergence = (
+            " Counting every forecast as its own bet would put this at "
+            f"{format_number(naive)} and trip the alarm; that reading double-counts overlapping "
+            "windows, so it is watched rather than acted on."
+        )
     if z <= -2.0:
         return (
             f"Live accuracy is {format_number(abs(z))} standard errors **below** the backtested "
-            f"claim across {int(n)} forecasts. That is decay, or a backtest that was overfitted "
-            "to begin with. Re-examine before trusting the model further."
+            f"claim across {int(blocks)} independent horizons. That is decay, or a backtest that "
+            "was overfitted to begin with. Re-examine before trusting the model further."
         )
     if z >= 2.0:
         return (
             f"Live accuracy is {format_number(z)} standard errors **above** the backtested claim "
-            f"across {int(n)} forecasts. Pleasant, but treat a large positive gap with the same "
-            "suspicion as a negative one: it usually means the live and backtest setups differ."
+            f"across {int(blocks)} independent horizons. Pleasant, but treat a large positive gap "
+            "with the same suspicion as a negative one: it usually means the live and backtest "
+            "setups differ."
         )
     return (
         f"Live accuracy sits within {format_number(abs(z))} standard errors of the backtested "
-        f"claim across {int(n)} forecasts - consistent with the backtest, no decay detected."
+        f"claim across {int(blocks)} independent horizons - consistent with the backtest, no "
+        f"decay detected.{divergence}"
     )
 
 
@@ -679,10 +707,13 @@ def render_journal_report(
                     named,
                     keys=(
                         "n_scored",
+                        "n_decided",
+                        "n_independent",
                         "backtest_directional_accuracy",
                         "live_hit_rate",
                         "hit_rate_gap",
                         "hit_rate_z",
+                        "hit_rate_z_naive",
                         "backtest_ic",
                         "live_ic",
                     ),
@@ -694,8 +725,20 @@ def render_journal_report(
                 "`hit_rate_z` is the live shortfall in units of its own standard error. "
                 "Around zero means consistent with the backtest; below -2 means the "
                 "backtest was promising something the live record is not delivering.",
-                "With few scored forecasts the z-score is near zero whatever happens. "
-                "Read `n_scored` first.",
+                "`n_independent` is the sample size that z is computed at: the number of "
+                "non-overlapping `horizon`-day windows the journal covers, counting every "
+                "forecast inside a window - all symbols, all dates - as one observation. "
+                "Forecasts recorded daily against a multi-day horizon overlap, and a "
+                "single-sector universe moves together, so `n_decided` badly overstates how "
+                "many independent bets have been placed.",
+                "`hit_rate_z_naive` is the same shortfall at `n_decided` trials, which is what "
+                "this report used to print. It assumes zero redundancy and `hit_rate_z` assumes "
+                "total redundancy within a window, so the honest figure lies between them. They "
+                "converge as the journal lengthens; while they disagree, believe the smaller.",
+                "`n_decided` excludes forecasts that took no side - a zero position cannot be "
+                "right or wrong, so it is not a trial.",
+                "With few independent windows the z-score is near zero whatever happens. "
+                "Read `n_independent` first.",
             ]
         )
 
@@ -704,7 +747,9 @@ def render_journal_report(
         report.text(
             f"`hit_rate_z` over the trailing {int(rolling['n_scored'].iloc[0])} matured "
             "forecasts, ending at each date shown. A single pooled z-score cannot say "
-            "*when* a gap opened; this can."
+            "*when* a gap opened; this can. A window that short spans only a handful of "
+            "non-overlapping horizons, so read the shape of the line rather than whether "
+            "any one point crosses -2."
         )
         dates = pd.to_datetime(rolling["asof_date"]).dt.date.astype(str)
         report.code_block(
@@ -714,7 +759,8 @@ def render_journal_report(
                 height=12,
             )
         )
-        tail = rolling[["asof_date", "n_scored", "live_hit_rate", "hit_rate_z"]].tail(10).copy()
+        columns = ["asof_date", "n_scored", "n_independent", "live_hit_rate", "hit_rate_z"]
+        tail = rolling[columns].tail(10).copy()
         tail["asof_date"] = pd.to_datetime(tail["asof_date"]).dt.date.astype(str)
         report.dataframe(tail.reset_index(drop=True), index=False)
 

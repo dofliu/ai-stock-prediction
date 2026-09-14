@@ -709,7 +709,9 @@ def _command_journal(args: argparse.Namespace) -> int:
         actual = format_number(pooled["live_hit_rate"], percent=True)
         lines.append(
             f"vs backtest        claim {claim} -> live {actual}"
-            f"  (z = {format_number(pooled['hit_rate_z'])})"
+            f"  (z = {format_number(pooled['hit_rate_z'])}"
+            f" over {int(pooled['n_independent'])} independent horizon(s);"
+            f" naive z = {format_number(pooled['hit_rate_z_naive'])})"
         )
     _echo("\n".join(lines), quiet=args.quiet)
     return 0

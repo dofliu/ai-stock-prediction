@@ -19,6 +19,7 @@ from ai_stock.journal import (
     ScoreResult,
     append_forecasts,
     compare_with_backtest,
+    independent_blocks,
     load_journal,
     record_forecasts,
     rolling_compare_with_backtest,
@@ -444,30 +445,32 @@ def test_comparison_reports_the_gap_and_its_z_score(daily_journal, prices, journ
     comparison = compare_with_backtest(result, claimed)
 
     live = result.metrics()["hit_rate"]
-    n = result.metrics()["n_scored"]
-    standard_error = math.sqrt(0.52 * 0.48 / n)
+    decided = comparison["n_decided"]
+    blocks = comparison["n_independent"]
 
     assert comparison["hit_rate_gap"] == pytest.approx(live - 0.52)
-    assert comparison["hit_rate_z"] == pytest.approx((live - 0.52) / standard_error)
+    assert comparison["hit_rate_z_naive"] == pytest.approx(
+        (live - 0.52) / math.sqrt(0.52 * 0.48 / decided)
+    )
+    assert comparison["hit_rate_z"] == pytest.approx(
+        (live - 0.52) / math.sqrt(0.52 * 0.48 / blocks)
+    )
     assert comparison["backtest_ic"] == pytest.approx(0.08)
 
 
 def test_the_same_gap_grows_more_significant_with_more_forecasts() -> None:
     """A shortfall means little at n=10 and a lot at n=1000."""
-
-    class _Fake:
-        def __init__(self, n: float, hit: float) -> None:
-            self._n, self._hit = n, hit
-
-        def metrics(self) -> dict[str, float]:
-            return {"n_scored": self._n, "hit_rate": self._hit, "live_ic": float("nan")}
-
     claimed = {"directional_accuracy": 0.55}
-    small = compare_with_backtest(_Fake(10, 0.40), claimed)
-    large = compare_with_backtest(_Fake(1000, 0.40), claimed)
+    small = _fake_result(10, [True] * 4 + [False] * 6)
+    large = _fake_result(1000, [True] * 400 + [False] * 600)
 
-    assert small["hit_rate_gap"] == pytest.approx(large["hit_rate_gap"])
-    assert abs(large["hit_rate_z"]) > abs(small["hit_rate_z"]) * 5
+    small_comparison = compare_with_backtest(small, claimed)
+    large_comparison = compare_with_backtest(large, claimed)
+
+    assert small_comparison["live_hit_rate"] == pytest.approx(0.40)
+    assert large_comparison["live_hit_rate"] == pytest.approx(0.40)
+    assert small_comparison["hit_rate_gap"] == pytest.approx(large_comparison["hit_rate_gap"])
+    assert abs(large_comparison["hit_rate_z"]) > abs(small_comparison["hit_rate_z"]) * 5
 
 
 def test_comparison_without_scored_forecasts_yields_no_z(prices, journal_config) -> None:
@@ -475,19 +478,97 @@ def test_comparison_without_scored_forecasts_yields_no_z(prices, journal_config)
     comparison = compare_with_backtest(empty, {"directional_accuracy": 0.52})
 
     assert comparison["n_scored"] == 0
+    assert comparison["n_decided"] == 0
+    assert comparison["n_independent"] == 0
     assert np.isnan(comparison["hit_rate_z"])
+    assert np.isnan(comparison["hit_rate_z_naive"])
 
 
-def _fake_scored(n: int, hits: list[bool]) -> pd.DataFrame:
+# --------------------------------------------------------------------------- #
+# How many independent bets the journal has actually seen
+# --------------------------------------------------------------------------- #
+def test_overlapping_daily_forecasts_are_not_independent_trials() -> None:
+    """Ten daily forecasts at a 5-day horizon are two bets, not ten."""
+    scored = _fake_scored(10, [True] * 10, horizon=5)
+
+    assert independent_blocks(scored) == 2
+
+
+def test_a_one_day_horizon_leaves_every_forecast_independent() -> None:
+    scored = _fake_scored(10, [True] * 10, horizon=1)
+
+    assert independent_blocks(scored) == 10
+
+
+def test_symbols_recorded_on_the_same_day_count_once() -> None:
+    """A universe moving together on one day is one observation, not four."""
+    same_day = pd.concat(
+        [_fake_scored(4, [True] * 4, horizon=2, symbol=name) for name in "ABCD"],
+        ignore_index=True,
+    )
+
+    # Four symbols x four trading days at horizon 2 = two blocks, not eight.
+    assert len(same_day) == 16
+    assert independent_blocks(same_day) == 2
+
+
+def test_independent_blocks_of_nothing_is_zero() -> None:
+    assert independent_blocks(_fake_scored(3, [True] * 3).iloc[:0]) == 0
+
+
+def test_overlap_shrinks_the_z_score_it_used_to_overstate() -> None:
+    """The headline z must not count the same market move five times.
+
+    Regression test for the defect this replaced: `hit_rate_z` divided the
+    gap by the standard error at *every* matured forecast, so recording the
+    same universe daily against a multi-day horizon inflated the apparent
+    significance without adding information.
+    """
+    scored = _fake_scored(50, [True] * 40 + [False] * 10, horizon=5)
+    result = ScoreResult(scored=scored, pending=scored.iloc[:0], cost_bps=5.0)
+
+    comparison = compare_with_backtest(result, {"directional_accuracy": 0.50})
+
+    assert comparison["n_decided"] == 50
+    assert comparison["n_independent"] == 10
+    # Same gap, same formula, fewer trials: exactly sqrt(50 / 10) smaller.
+    assert comparison["hit_rate_z"] == pytest.approx(
+        comparison["hit_rate_z_naive"] / math.sqrt(5.0)
+    )
+    assert abs(comparison["hit_rate_z"]) < abs(comparison["hit_rate_z_naive"])
+
+
+def test_undecided_forecasts_are_not_counted_as_trials() -> None:
+    """A zero position cannot be right or wrong, so it is not a trial.
+
+    Regression test: `hit_rate` was already computed over decided rows only,
+    but its standard error used `n_scored`, which includes the flat ones.
+    That made the z-score larger than the sample behind it justified.
+    """
+    scored = _fake_scored(20, [True] * 15 + [False] * 5, horizon=1)
+    scored.loc[scored.index[:8], "position"] = 0.0
+    result = ScoreResult(scored=scored, pending=scored.iloc[:0], cost_bps=5.0)
+
+    comparison = compare_with_backtest(result, {"directional_accuracy": 0.50})
+
+    assert comparison["n_scored"] == 20
+    assert comparison["n_decided"] == 12
+    assert comparison["n_independent"] == 12
+    assert comparison["hit_rate_z"] == pytest.approx(
+        (comparison["live_hit_rate"] - 0.50) / math.sqrt(0.25 / 12)
+    )
+
+
+def _fake_scored(n: int, hits: list[bool], horizon: int = 1, symbol: str = "AAA") -> pd.DataFrame:
     """A minimal scored frame: always long, right or wrong on cue."""
     position = np.ones(n)
     realised = np.where(hits, 1.0, -1.0) * 0.01
     return pd.DataFrame(
         {
             "asof_date": pd.date_range("2024-01-01", periods=n, freq="D"),
-            "symbol": "AAA",
+            "symbol": symbol,
             "model": "manual",
-            "horizon": 1,
+            "horizon": horizon,
             "signal": position,
             "position": position,
             "close": 100.0,
@@ -497,6 +578,11 @@ def _fake_scored(n: int, hits: list[bool]) -> pd.DataFrame:
             "pnl": position * realised,
         }
     )
+
+
+def _fake_result(n: int, hits: list[bool], horizon: int = 1) -> ScoreResult:
+    scored = _fake_scored(n, hits, horizon=horizon)
+    return ScoreResult(scored=scored, pending=scored.iloc[:0], cost_bps=5.0)
 
 
 def test_rolling_comparison_is_empty_below_the_window() -> None:
@@ -509,12 +595,15 @@ def test_rolling_comparison_is_empty_below_the_window() -> None:
     assert list(rolling.columns) == [
         "asof_date",
         "n_scored",
+        "n_decided",
+        "n_independent",
         "backtest_directional_accuracy",
         "live_hit_rate",
         "hit_rate_gap",
         "backtest_ic",
         "live_ic",
         "hit_rate_z",
+        "hit_rate_z_naive",
     ]
 
 
