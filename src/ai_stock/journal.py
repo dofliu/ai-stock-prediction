@@ -35,6 +35,7 @@ __all__ = [
     "ScoreResult",
     "append_forecasts",
     "compare_with_backtest",
+    "data_freshness",
     "independent_blocks",
     "load_journal",
     "record_forecasts",
@@ -335,6 +336,100 @@ def append_forecasts(path: str | Path, forecasts: list[Forecast]) -> pd.DataFram
 
 MIN_TRAIN_ROWS = 250
 """Labelled bars a symbol needs before its forecast is worth recording."""
+
+STALE_AFTER_DAYS = 4
+"""Calendar days after which a price feed is reported as behind.
+
+Four spans a Friday close read on the following Tuesday, so an ordinary
+weekend never trips it. Anything longer is either a market holiday or a
+broken feed, and this module cannot tell those apart - see
+:func:`data_freshness` for why it reports both the same way.
+"""
+
+
+def _last_bar_date(frame: pd.DataFrame | None) -> pd.Timestamp | None:
+    """Date of the most recent bar, or ``None`` if the frame cannot supply one."""
+    if frame is None or len(frame) == 0:
+        return None
+    index = frame.index
+    if not isinstance(index, pd.DatetimeIndex):
+        try:
+            index = pd.to_datetime(index)
+        except (TypeError, ValueError):
+            return None
+    index = index.dropna()
+    if len(index) == 0:
+        return None
+    return pd.Timestamp(index.max()).normalize()
+
+
+def data_freshness(
+    universe: dict[str, pd.DataFrame],
+    *,
+    asof: pd.Timestamp | None = None,
+    stale_after_days: int = STALE_AFTER_DAYS,
+) -> pd.DataFrame:
+    """How old each symbol's most recent bar is, relative to ``asof``.
+
+    Every other number in this module describes a model. This one describes the
+    data underneath it, and the two fail in opposite directions. When a price
+    feed stops, the journal does not go quiet - it goes stale *confidently*.
+    :func:`score_journal` keeps maturing the same forecasts against the same
+    bars, :func:`record_forecasts` adds nothing because the last bar is already
+    journalled, and the report reads exactly as it did the day the feed was
+    healthy. A hit rate that has not moved for a week looks identical whether
+    the strategy is quiet or the downloader is dead.
+
+    ``age_days`` is calendar days, not trading days, so a long market holiday
+    is reported as stale. That is the deliberate direction to err in: a
+    spurious "check the feed" costs a glance, and a silently stale hit rate
+    costs the only number in this project that cannot be tuned after the fact.
+    Reading it requires knowing the market's calendar, which this frame does
+    not claim to - it reports the gap and names it, rather than deciding.
+
+    Symbols whose frame is empty or carries no usable dates are reported with a
+    missing (``NaN``) ``last_bar`` and an infinite age, because an unreadable
+    feed is not a fresh one.
+
+    >>> import pandas as pd
+    >>> bars = pd.DataFrame(
+    ...     {"close": [1.0, 2.0]},
+    ...     index=pd.to_datetime(["2026-01-05", "2026-01-06"]),
+    ... )
+    >>> frame = data_freshness({"X": bars}, asof=pd.Timestamp("2026-01-13"))
+    >>> frame.loc["X", "last_bar"]
+    '2026-01-06'
+    >>> float(frame.loc["X", "age_days"])
+    7.0
+    >>> bool(frame.loc["X", "stale"])
+    True
+    """
+    columns = ["symbol", "last_bar", "age_days", "stale"]
+    if not universe:
+        return pd.DataFrame(columns=columns).set_index("symbol")
+
+    reference = (pd.Timestamp(asof) if asof is not None else pd.Timestamp.today()).normalize()
+
+    rows = []
+    for symbol in sorted(universe):
+        last_bar = _last_bar_date(universe[symbol])
+        if last_bar is None:
+            rows.append(
+                {"symbol": symbol, "last_bar": None, "age_days": float("inf"), "stale": True}
+            )
+            continue
+        age = float((reference - last_bar).days)
+        rows.append(
+            {
+                "symbol": symbol,
+                "last_bar": last_bar.date().isoformat(),
+                "age_days": age,
+                "stale": age > stale_after_days,
+            }
+        )
+    frame = pd.DataFrame(rows, columns=columns).set_index("symbol")
+    frame["stale"] = frame["stale"].astype(bool)
+    return frame
 
 
 def _size_position(

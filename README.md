@@ -54,6 +54,27 @@ pip install -e ".[dev]"
 
 只需要 `numpy`、`pandas`、`scikit-learn`；圖表以 ASCII 繪製，不需要 matplotlib。
 
+### 送出修改前：`make check`
+
+```bash
+make check    # lint + test + doctest + smoke，約 40 秒
+```
+
+這一條跑的是 `.github/workflows/ci.yml` 的完整內容、同樣順序。**CI 目前因為
+Actions 額度用盡而無法執行**，所以在額度恢復之前，這是一個修改與 `main`
+之間唯一的關卡——請在 push 前跑過，並把結果寫進 PR。
+
+| 關卡 | 內容 |
+|---|---|
+| `make lint` | `ruff check` + `ruff format --check`，涵蓋 `src tests scripts` |
+| `make test` | `pytest -q` |
+| `make doctest` | `pytest --doctest-modules src/ai_stock`（`make test` **不會**跑到這些） |
+| `make smoke` | CLI 端到端：`data → compare → simulate → screen`，寫入暫存目錄 |
+
+> `make clean` 不會刪除 `data/prices/` 與 `data/journal/`。
+> 日誌的每一列都在結果出現前就寫下了，重跑一次會用到更多資料配適的模型——
+> 那正是本專案拒絕的事後調整。被刪掉的當日預測救不回來。
+
 ---
 
 ## 快速開始
@@ -147,6 +168,7 @@ ai-stock journal --data data/prices --journal data/journal/forecasts.csv --out r
 3. 比對 live 命中率與回測宣稱值，並用 **z 值**（差距 ÷ 自身標準誤）說明兩者是否一致。
 
 ```
+data as of         2026-09-11
 scored / pending   108 / 12
 live hit rate      56.48%
 live IC            0.1824
@@ -155,6 +177,13 @@ vs backtest        claim 50.55% -> live 56.48%  (z = 1.2337)
 
 判讀：**先看 `n_scored`**。少於 30 筆時 z 值不管發生什麼都接近 0，報告會直接說
 「太少，什麼都不能講」。z ≤ −2 才是衰減訊號——回測承諾了 live 交不出來的東西。
+
+> **再看 `data as of`。** 行情源停掉時，這份報告不會變安靜，它會有自信地重複：
+> 同一批預測對同一批 bar 到期，命中率一字不差地再報一次。任何標的落後超過
+> 四個日曆天，這一行會標成 `STALE` 並點名，報告也會在所有績效數字之前說明。
+> 判斷標準是日曆天而非交易日，所以長假會被誤報為落後——這是刻意選的方向：
+> 多看一眼下載器幾乎沒有成本，一個悄悄停止更新的命中率則毀掉唯一無法事後
+> 調整的數字。細節見 `docs/methodology.md` 7d 節。
 
 > `live_ic` 取各標的 IC 的平均，而非把所有標的丟進同一個相關係數
 > （後者列為 `live_ic_pooled` 僅供對照）。理由與 `ic_fold_mean` 相同：
