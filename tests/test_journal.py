@@ -19,6 +19,7 @@ from ai_stock.journal import (
     ScoreResult,
     append_forecasts,
     compare_with_backtest,
+    data_freshness,
     independent_blocks,
     load_journal,
     record_forecasts,
@@ -633,3 +634,74 @@ def test_rolling_comparison_finds_when_a_pooled_z_hides_it() -> None:
     assert rolling["hit_rate_z"].iloc[-1] < -2
     # The pooled view averages the collapse away; the rolling view does not.
     assert pooled["hit_rate_z"] > rolling["hit_rate_z"].iloc[-1]
+
+
+# --------------------------------------------------------------------------- #
+# Data freshness
+# --------------------------------------------------------------------------- #
+
+
+def _bars(dates: list[str]) -> pd.DataFrame:
+    index = pd.to_datetime(dates)
+    return pd.DataFrame({"close": np.arange(1.0, len(index) + 1.0)}, index=index)
+
+
+def test_data_freshness_reports_age_and_last_bar() -> None:
+    universe = {"AAA": _bars(["2026-01-05", "2026-01-06"])}
+
+    frame = data_freshness(universe, asof=pd.Timestamp("2026-01-09"))
+
+    assert list(frame.index) == ["AAA"]
+    assert frame.loc["AAA", "last_bar"] == "2026-01-06"
+    assert frame.loc["AAA", "age_days"] == pytest.approx(3.0)
+    assert not frame.loc["AAA", "stale"]
+
+
+def test_data_freshness_flags_a_feed_that_stopped() -> None:
+    """The case this exists for: bars stop arriving and every other number repeats."""
+    universe = {"AAA": _bars(["2026-01-05", "2026-01-06"])}
+
+    frame = data_freshness(universe, asof=pd.Timestamp("2026-01-20"))
+
+    assert frame.loc["AAA", "age_days"] == pytest.approx(14.0)
+    assert frame.loc["AAA", "stale"]
+
+
+def test_data_freshness_tolerates_an_ordinary_weekend() -> None:
+    """A Friday bar read on the following Monday is not a broken feed."""
+    friday = _bars(["2026-01-08", "2026-01-09"])
+
+    monday = data_freshness({"AAA": friday}, asof=pd.Timestamp("2026-01-12"))
+    tuesday = data_freshness({"AAA": friday}, asof=pd.Timestamp("2026-01-13"))
+
+    assert not monday.loc["AAA", "stale"]
+    assert not tuesday.loc["AAA", "stale"]
+
+
+def test_data_freshness_treats_an_unreadable_feed_as_stale() -> None:
+    """An empty frame is not a fresh one - it must not read as up to date."""
+    universe = {"AAA": _bars(["2026-01-06"]), "BBB": _bars([])}
+
+    frame = data_freshness(universe, asof=pd.Timestamp("2026-01-07"))
+
+    assert pd.isna(frame.loc["BBB", "last_bar"])
+    assert not np.isfinite(frame.loc["BBB", "age_days"])
+    assert frame.loc["BBB", "stale"]
+    assert not frame.loc["AAA", "stale"]
+
+
+def test_data_freshness_is_empty_for_an_empty_universe() -> None:
+    frame = data_freshness({})
+
+    assert frame.empty
+    assert list(frame.columns) == ["last_bar", "age_days", "stale"]
+
+
+def test_data_freshness_threshold_is_configurable() -> None:
+    universe = {"AAA": _bars(["2026-01-06"])}
+
+    lenient = data_freshness(universe, asof=pd.Timestamp("2026-01-12"), stale_after_days=10)
+    strict = data_freshness(universe, asof=pd.Timestamp("2026-01-12"), stale_after_days=2)
+
+    assert not lenient.loc["AAA", "stale"]
+    assert strict.loc["AAA", "stale"]

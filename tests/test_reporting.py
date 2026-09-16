@@ -13,7 +13,7 @@ from ai_stock.config import (
     SyntheticConfig,
     WalkForwardConfig,
 )
-from ai_stock.journal import ScoreResult, compare_with_backtest
+from ai_stock.journal import ScoreResult, compare_with_backtest, data_freshness
 from ai_stock.pipeline import compare_models, run_model, run_simulation
 from ai_stock.reporting.report import (
     Report,
@@ -247,3 +247,42 @@ def test_journal_report_shows_both_sample_sizes() -> None:
 
     assert "n_independent" in rendered
     assert "hit_rate_z_naive" in rendered
+
+
+def test_journal_report_warns_when_the_price_feed_has_stopped() -> None:
+    """A stale feed must be stated before the performance it silently describes."""
+    live = _journal_result(40, hits=22, horizon=5)
+    bars = pd.DataFrame({"close": [1.0, 2.0]}, index=pd.to_datetime(["2026-09-10", "2026-09-11"]))
+    freshness = data_freshness({"AAA": bars}, asof=pd.Timestamp("2026-09-16"))
+
+    rendered = render_journal_report(
+        live, ExperimentConfig(), model_name="manual", freshness=freshness
+    )
+
+    assert "The price data is not current" in rendered
+    assert "## Data freshness" in rendered
+    assert "2026-09-11" in rendered
+    # The warning has to precede the numbers it qualifies, or it is decoration.
+    assert rendered.index("The price data is not current") < rendered.index("## Live performance")
+
+
+def test_journal_report_states_freshness_even_when_current() -> None:
+    """Silence on a healthy feed is indistinguishable from not having checked."""
+    live = _journal_result(40, hits=22, horizon=5)
+    bars = pd.DataFrame({"close": [1.0, 2.0]}, index=pd.to_datetime(["2026-09-14", "2026-09-15"]))
+    freshness = data_freshness({"AAA": bars}, asof=pd.Timestamp("2026-09-16"))
+
+    rendered = render_journal_report(
+        live, ExperimentConfig(), model_name="manual", freshness=freshness
+    )
+
+    assert "Prices are current" in rendered
+    assert "The price data is not current" not in rendered
+
+
+def test_journal_report_omits_freshness_when_not_supplied() -> None:
+    live = _journal_result(40, hits=22, horizon=5)
+
+    rendered = render_journal_report(live, ExperimentConfig(), model_name="manual")
+
+    assert "Data freshness" not in rendered

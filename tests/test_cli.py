@@ -447,3 +447,37 @@ def test_too_little_data_exits_with_code_two(capsys) -> None:
 def test_invalid_sizing_is_caught_by_argparse() -> None:
     with pytest.raises(SystemExit):
         main(["backtest", "--sizing", "martingale"])
+
+
+def test_journal_stdout_states_how_current_the_prices_are(tmp_path: Path, capsys) -> None:
+    """The line that would have caught a downloader that quietly stopped.
+
+    The synthetic universe ends in 2012, so it is unambiguously behind and the
+    run must say so next to the hit rate rather than leaving the reader to
+    infer it from a number that stopped moving.
+    """
+    folder = tmp_path / "prices"
+    _write_universe(folder)
+
+    assert (
+        main(
+            [
+                "journal",
+                "--data",
+                str(folder),
+                "--model",
+                "ridge",
+                "--journal",
+                str(tmp_path / "f.csv"),
+                "--min-train-rows",
+                "300",
+                "--no-compare",
+            ]
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "data as of         2012-09-07" in out
+    assert "STALE" in out
+    assert "AAA" in out and "BBB" in out

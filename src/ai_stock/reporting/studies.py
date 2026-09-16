@@ -721,6 +721,34 @@ verdict would be describing its own noise.
 """
 
 
+def _freshness_verdict(freshness: pd.DataFrame) -> str:
+    """State whether the prices under this report are current."""
+    stale = freshness[freshness["stale"]]
+    if stale.empty:
+        newest = freshness["age_days"].min()
+        return f"Prices are current: every symbol's last bar is {int(newest)} day(s) old."
+
+    unreadable = sorted(stale.index[~np.isfinite(stale["age_days"])])
+    behind = stale[np.isfinite(stale["age_days"])]
+    parts = []
+    if not behind.empty:
+        names = ", ".join(
+            f"`{symbol}` ({int(row['age_days'])}d, last bar {row['last_bar']})"
+            for symbol, row in behind.iterrows()
+        )
+        parts.append(f"behind: {names}")
+    if unreadable:
+        parts.append("unreadable: " + ", ".join(f"`{s}`" for s in unreadable))
+
+    return (
+        f"**The price data is not current** - {'; '.join(parts)}. "
+        "Every number below describes the market as of those bars, not today, and it "
+        "will keep describing them - unchanged and without complaint - for as long as "
+        "the feed stays down. Check the downloader before reading the performance as "
+        "a live result."
+    )
+
+
 def _decay_verdict(comparison: dict[str, float]) -> str:
     """State what the live record says about the backtest's claim."""
     n = comparison.get("n_scored", 0.0)
@@ -781,11 +809,16 @@ def render_journal_report(
     rolling: pd.DataFrame | None = None,
     recorded: int = 0,
     skipped: list[str] | None = None,
+    freshness: pd.DataFrame | None = None,
 ) -> str:
     """Report what the live forecast journal says, against what was promised.
 
     The journal is the only score that cannot be tuned after the fact, so this
     report leads with the live-versus-backtest gap rather than with P&L.
+
+    ``freshness`` is :func:`ai_stock.journal.data_freshness` over the same
+    universe. It is rendered above the performance tables, because a stale feed
+    makes every number below it describe a day that has already passed.
     """
     metrics = live.metrics()
     report = Report(
@@ -798,6 +831,9 @@ def render_journal_report(
         _decay_verdict(pooled) if pooled else _decay_verdict({"n_scored": metrics["n_scored"]})
     )
 
+    if freshness is not None and not freshness.empty:
+        report.text(_freshness_verdict(freshness))
+
     report.heading("Today's run").bullets(
         [
             f"Forecasts recorded: {recorded}",
@@ -809,6 +845,32 @@ def render_journal_report(
             f"Costs: {config.backtest.total_cost_bps:g} bps per unit traded",
         ]
     )
+
+    if freshness is not None and not freshness.empty:
+        report.heading("Data freshness")
+        report.table(
+            ["symbol", "last bar", "age (days)", "behind?"],
+            [
+                [
+                    str(symbol),
+                    "-" if pd.isna(row["last_bar"]) else str(row["last_bar"]),
+                    "-" if not np.isfinite(row["age_days"]) else f"{row['age_days']:.0f}",
+                    "yes" if row["stale"] else "no",
+                ]
+                for symbol, row in freshness.iterrows()
+            ],
+        )
+        report.bullets(
+            [
+                "`age (days)` is calendar days from the symbol's last bar to today, so a "
+                "long market holiday reads as behind. That is the cheap direction to be "
+                "wrong in: a needless glance at the feed costs nothing, a hit rate that "
+                "quietly stopped moving costs the only untunable number here.",
+                "A stopped feed does not make this report go quiet - it makes it repeat. "
+                "The same forecasts mature against the same bars and the same hit rate "
+                "comes back, which is why the age is stated before the performance.",
+            ]
+        )
 
     report.heading("Live performance")
     report.raw_table(
