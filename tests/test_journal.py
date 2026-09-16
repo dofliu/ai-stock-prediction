@@ -637,6 +637,93 @@ def test_rolling_comparison_finds_when_a_pooled_z_hides_it() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# The journal is append-only at the byte level, not just in intent
+# --------------------------------------------------------------------------- #
+# A real signal from data/journal/forecasts.csv. Its last digits are what
+# pandas' default (fast, not correctly rounded) CSV parser loses.
+_FULL_PRECISION_ROW = (
+    "asof_date,symbol,model,horizon,signal,position,close\n"
+    "2026-09-11,2337.TW,random_forest,5,-0.00022434702355224193,-1.0,119.0\n"
+    "2026-09-11,MU,random_forest,5,0.0035066770493532985,1.0,975.260009765625\n"
+)
+
+
+def test_load_journal_parses_signals_exactly(tmp_path: Path) -> None:
+    """The default parser lands up to an ulp off the value the text denotes."""
+    path = tmp_path / "forecasts.csv"
+    path.write_text(_FULL_PRECISION_ROW, encoding="utf-8")
+
+    frame = load_journal(path)
+
+    signals = dict(zip(frame["symbol"], frame["signal"], strict=True))
+    assert signals["MU"] == float("0.0035066770493532985")
+    assert signals["2337.TW"] == float("-0.00022434702355224193")
+
+
+def test_recording_a_duplicate_leaves_the_file_byte_identical(tmp_path: Path) -> None:
+    """Re-recording an already-journalled bar must not touch a single byte.
+
+    The daily job re-runs against a feed that has not moved all the time - a
+    stale price file, a retried job, a second run on the same day. Every one of
+    those rewrote the whole file, and the rewrite perturbed the last bits of
+    every signal already recorded.
+    """
+    path = tmp_path / "forecasts.csv"
+    path.write_text(_FULL_PRECISION_ROW, encoding="utf-8")
+    duplicate = Forecast(
+        asof_date=pd.Timestamp("2026-09-11"),
+        symbol="MU",
+        model="random_forest",
+        horizon=5,
+        signal=0.0035066770493532985,
+        position=1.0,
+        close=975.260009765625,
+    )
+
+    append_forecasts(path, [duplicate])
+
+    assert path.read_text(encoding="utf-8") == _FULL_PRECISION_ROW
+
+
+def test_recording_a_new_forecast_preserves_every_existing_row(tmp_path: Path) -> None:
+    """A new row may be added; the rows already on disk may not change."""
+    path = tmp_path / "forecasts.csv"
+    path.write_text(_FULL_PRECISION_ROW, encoding="utf-8")
+    fresh = Forecast(
+        asof_date=pd.Timestamp("2026-09-16"),
+        symbol="MU",
+        model="random_forest",
+        horizon=5,
+        signal=0.0012345678901234567,
+        position=1.0,
+        close=980.0,
+    )
+
+    append_forecasts(path, [fresh])
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines[: len(_FULL_PRECISION_ROW.splitlines())] == _FULL_PRECISION_ROW.splitlines()
+    assert lines[-1].startswith("2026-09-16,MU")
+
+
+def test_repeated_recording_never_drifts(tmp_path: Path) -> None:
+    """Ten no-op days must leave the record exactly as the first day wrote it."""
+    path = tmp_path / "forecasts.csv"
+    path.write_text(_FULL_PRECISION_ROW, encoding="utf-8")
+    duplicate = Forecast(
+        asof_date=pd.Timestamp("2026-09-11"),
+        symbol="MU",
+        model="random_forest",
+        horizon=5,
+        signal=0.0035066770493532985,
+        position=1.0,
+        close=975.260009765625,
+    )
+
+    for _ in range(10):
+        append_forecasts(path, [duplicate])
+
+    assert path.read_text(encoding="utf-8") == _FULL_PRECISION_ROW
 # Data freshness
 # --------------------------------------------------------------------------- #
 

@@ -276,11 +276,21 @@ class ScoreResult:
 
 
 def load_journal(path: str | Path) -> pd.DataFrame:
-    """Read the journal, or return an empty frame with the right columns."""
+    """Read the journal, or return an empty frame with the right columns.
+
+    Read with ``float_precision="round_trip"``. pandas' default CSV float
+    parser is fast rather than correctly rounded, and lands up to an ulp away
+    from the value the text denotes. That is far too small to move any
+    statistic here - but :func:`append_forecasts` rewrites the whole file each
+    day, so the slightly-wrong float is what gets written back, and a row
+    recorded before its outcome existed silently stops being the row that was
+    recorded. The journal's entire claim is that it is append-only; a parser
+    that perturbs old rows on every read quietly makes that false.
+    """
     path = Path(path)
     if not path.exists():
         return pd.DataFrame(columns=list(JOURNAL_COLUMNS))
-    frame = pd.read_csv(path)
+    frame = pd.read_csv(path, float_precision="round_trip")
     missing = [column for column in JOURNAL_COLUMNS if column not in frame.columns]
     if missing:
         raise ValueError(f"{path} is missing journal column(s): {', '.join(missing)}")
