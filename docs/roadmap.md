@@ -11,6 +11,10 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Next
 
+- [ ] **Effective sample size for `ic_fold_t`.** The journal's `hit_rate_z` now
+  divides by non-overlapping horizon blocks rather than by row count, but
+  `ic_fold_t` still carries the optimistic degrees of freedom that limitation 4
+  in `docs/methodology.md` describes. The same block logic applies.
 - [ ] **Rolling correlation in the portfolio section.** `effective_bets` is a
   full-sample average, and correlations rise in exactly the drawdowns the
   diversification was supposed to cushion. A rolling window would show whether
@@ -64,6 +68,15 @@ Keep each item small enough to land in one reviewed pull request.
   swings from irrelevant to dominant between folds no longer looks the same
   as one that is consistently useful. Surfaced in the backtest report as a
   mean/std/cv table.
+- [x] Fixed the standard error behind `hit_rate_z`, the one number in this
+  project that cannot be tuned after the fact. It divided the live-versus-
+  backtest gap by the standard error at every matured forecast, which counts
+  the same market move once per overlapping horizon and once per correlated
+  symbol; `independent_blocks()` now counts non-overlapping horizon windows
+  instead, and the old figure is kept beside it as `hit_rate_z_naive` so the
+  two bracket the honest answer. Also fixed a smaller defect the same code
+  path hid: `hit_rate` was computed over forecasts that took a side, but its
+  standard error used `n_scored`, which includes flat ones.
 - [x] Multi-asset portfolio construction (`ai_stock.portfolio`): the screened
   symbols aligned onto their common trading calendar and held together, with
   the diversification the realised correlation actually delivers reported as a
