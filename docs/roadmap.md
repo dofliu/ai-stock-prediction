@@ -22,6 +22,14 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Next
 
+- [ ] **Fail the daily workflow on a stale feed.** `data_freshness` now reports
+  a stopped feed, but only to whoever reads the output.
+  `.github/workflows/daily-prices.yml` already fails when a *symbol* fails to
+  download; it does not fail when every download "succeeds" and returns nothing
+  new. A `--fail-if-stale` flag on `ai-stock journal`, wired into the workflow
+  after the commit step, would turn the observation into an alarm. Deliberately
+  left out of the reporting change so that the flag lands with the workflow
+  wiring it needs, rather than as an unused option.
 - [ ] **Effective sample size for `ic_fold_t`.** The journal's `hit_rate_z` now
   divides by non-overlapping horizon blocks rather than by row count, but
   `ic_fold_t` still carries the optimistic degrees of freedom that limitation 4
@@ -115,6 +123,14 @@ Keep each item small enough to land in one reviewed pull request.
   fixes a `make clean` that ran `rm -rf data` - which is `data/journal/`,
   the record that cannot be regenerated, and which `.gitignore` goes out of
   its way to preserve. `tests/test_makefile.py` pins all of it.
+- [x] Data freshness in the journal (`ai_stock.journal.data_freshness`): the
+  age of each symbol's most recent bar, stated in the report and on the CLI
+  above the performance it qualifies. Found while diagnosing a three-day
+  outage in the daily workflow - the journal had gone on reporting an 80% hit
+  rate from bars that stopped arriving on 2026-09-11, because a stopped feed
+  does not make this report go quiet, it makes it repeat. Calendar days, not
+  trading days, so a long market holiday reads as behind; that is the cheap
+  direction to be wrong in.
 
 ## Rejected, and why
 
