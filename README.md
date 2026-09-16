@@ -54,6 +54,27 @@ pip install -e ".[dev]"
 
 只需要 `numpy`、`pandas`、`scikit-learn`；圖表以 ASCII 繪製，不需要 matplotlib。
 
+### 送出修改前：`make check`
+
+```bash
+make check    # lint + test + doctest + smoke，約 40 秒
+```
+
+這一條跑的是 `.github/workflows/ci.yml` 的完整內容、同樣順序。**CI 目前因為
+Actions 額度用盡而無法執行**，所以在額度恢復之前，這是一個修改與 `main`
+之間唯一的關卡——請在 push 前跑過，並把結果寫進 PR。
+
+| 關卡 | 內容 |
+|---|---|
+| `make lint` | `ruff check` + `ruff format --check`，涵蓋 `src tests scripts` |
+| `make test` | `pytest -q` |
+| `make doctest` | `pytest --doctest-modules src/ai_stock`（`make test` **不會**跑到這些） |
+| `make smoke` | CLI 端到端：`data → compare → simulate → screen`，寫入暫存目錄 |
+
+> `make clean` 不會刪除 `data/prices/` 與 `data/journal/`。
+> 日誌的每一列都在結果出現前就寫下了，重跑一次會用到更多資料配適的模型——
+> 那正是本專案拒絕的事後調整。被刪掉的當日預測救不回來。
+
 ---
 
 ## 快速開始
