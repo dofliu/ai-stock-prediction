@@ -94,11 +94,27 @@ ai-stock journal --data data/prices --model random_forest --horizon 5 \
 | p_value              | 0.0100        | 0.0498     | 0.2525    | 0.4020    |
 | q_value              | 0.0399        | 0.0997     | 0.3367    | 0.4020    |
 
+held together   4 sleeves, equally weighted, correlated 0.05 -> 3.51 effective bet(s)
+the shares      correlated 0.36 -> 1.94 if you just held them
+portfolio       Sharpe 0.8030 vs 0.8566 if the sleeves were independent
+
 4 symbol(s) tested · noise alone would flag 0.2000 · survivors: DRAM_PUREPLAY
 ```
 
 判讀順序：**先看 `excess_sharpe`**（負的就不用往下看了，你贏不過買進持有），
 **再看 `q_value`**（不是 `p_value`），最後才是 IC 與準確率。
+
+### 四檔一起做，等於幾個賭注？
+
+排名表的每一列都假設「只做這一檔」。一起持有是另一個問題，報告的
+「Held together」一節會回答：相關矩陣、分散比、**有效賭注數**
+（$\mathrm{DR}^2$，等權等波動下即 $n/(1+(n-1)\rho)$）、各腿的風險貢獻，
+以及「如果四腿彼此獨立，Sharpe 會是多少」。
+
+值得注意的是**策略腿之間的相關（0.05）遠低於股票本身（0.36）**。
+這不自動是好消息：腿與腿會因為模型剛好站在不同邊而去相關，而**互相亂猜的模型
+看起來就長這樣**。要先確認每一腿真的有邊際（看 `vs B&H` 與 `q`），
+去相關才算得上分散。詳見 [方法論 8 節](docs/methodology.md)。
 
 ### 輸出範例
 
@@ -185,6 +201,7 @@ src/ai_stock/
 ├── pipeline.py          # 端到端流程（CLI 只是它的薄殼）
 ├── cli.py               # data / backtest / compare / simulate / screen / journal / models
 ├── journal.py           # 預測日誌：事前記錄、到期計分、live vs 回測
+├── portfolio.py         # 合併多檔：相關性、分散比、有效賭注數、風險貢獻
 ├── data/
 │   ├── synthetic.py     # regime 切換 + GARCH 波動叢聚 + 厚尾 + 已知邊際
 │   └── loaders.py       # CSV 載入、OHLCV 驗證、yfinance（選用）
@@ -270,7 +287,9 @@ ohlcv = load_yfinance("2330.TW", period="10y")   # pip install yfinance
 
 ## 限制
 
-- 單一標的、日頻、無資金限制與融券成本；不模擬市場衝擊與流動性。
+- 訊號逐檔獨立產生；`screen` 會報出投組層級的相關性與有效賭注數，但權重全樣本固定、
+  腿間再平衡不計成本，也沒有資金限制與融券成本；不模擬市場衝擊與流動性。
+- 日頻；跨時區標的以日期對齊，同日相關因此被低估。
 - 特徵集、模型清單與超參數是看著資料選的，這種選擇偏誤無法被回測消除。
 - 合成市場的邊際是**刻意植入**的；能還原它只證明管線正確，不代表真實市場存在邊際。
 - 報告中的所有數字皆為研究輸出，**不是投資建議**。
