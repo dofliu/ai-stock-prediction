@@ -9,16 +9,24 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Now
 
-- [ ] **Multi-asset portfolio construction.** Everything is single-asset today.
-  Correlated memory names traded together are not four independent bets, and
-  nothing in the framework says so.
-
 ## Next
 
 - [ ] **Effective sample size for `ic_fold_t`.** The journal's `hit_rate_z` now
   divides by non-overlapping horizon blocks rather than by row count, but
   `ic_fold_t` still carries the optimistic degrees of freedom that limitation 4
   in `docs/methodology.md` describes. The same block logic applies.
+- [ ] **Rolling correlation in the portfolio section.** `effective_bets` is a
+  full-sample average, and correlations rise in exactly the drawdowns the
+  diversification was supposed to cushion. A rolling window would show whether
+  the bet count collapses when it matters, the same way `hit_rate_z` over the
+  journal's timeline shows *when* a decay started.
+- [ ] **Time-zone-aware alignment for cross-market correlation.** Matching a
+  Taipei bar to a New York bar by calendar date understates their correlation:
+  part of a shared move lands on the next date for one of them. Lagging one
+  market by a bar, or comparing weekly returns, would size the effect. It is
+  visible in the current output - `MU` correlates 0.13-0.19 with the Taiwan
+  names against 0.46-0.65 among themselves - so the effective bet count is
+  currently flattered by an unknown amount.
 
 ## Later
 
@@ -69,6 +77,17 @@ Keep each item small enough to land in one reviewed pull request.
   two bracket the honest answer. Also fixed a smaller defect the same code
   path hid: `hit_rate` was computed over forecasts that took a side, but its
   standard error used `n_scored`, which includes flat ones.
+- [x] Multi-asset portfolio construction (`ai_stock.portfolio`): the screened
+  symbols aligned onto their common trading calendar and held together, with
+  the diversification the realised correlation actually delivers reported as a
+  diversification ratio, an effective number of bets (`DR^2`, which reduces to
+  `n / (1 + (n-1) * rho)` for the equicorrelated case), per-sleeve risk
+  contributions, and the Sharpe the same sleeves would show if independent.
+  Equal-weight and inverse-volatility only - no scheme reads the correlation
+  matrix, so none can overfit it. The sleeve correlation is always reported
+  next to the buy-and-hold correlation of the same names, because sleeves that
+  decorrelate only because two models disagree look identical to sleeves that
+  decorrelate because the names do.
 - [x] Regime-conditional evaluation: `WalkForwardResult.regime_metrics()`
   splits pooled out-of-sample predictions into terciles of trailing realised
   volatility (computed causally on the full price series before folding, so

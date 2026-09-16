@@ -614,6 +614,25 @@ def _command_screen(args: argparse.Namespace) -> int:
                 label="metric",
             )
         )
+    if len(result.ranked) > 1:
+        try:
+            portfolio = result.portfolio().metrics()
+        except ValueError as error:
+            lines.append(f"\nno portfolio view: {error}")
+        else:
+            lines.append(
+                f"\nheld together   {int(portfolio['n_sleeves'])} sleeves, equally weighted, "
+                f"correlated {format_number(portfolio['mean_correlation'], digits=2)} "
+                f"-> {format_number(portfolio['effective_bets'], digits=2)} effective bet(s)"
+                f"\nthe shares      correlated "
+                f"{format_number(portfolio['mean_asset_correlation'], digits=2)} "
+                f"-> {format_number(portfolio['asset_effective_bets'], digits=2)} "
+                "if you just held them"
+                f"\nportfolio       Sharpe {format_number(portfolio['sharpe'])} "
+                f"vs {format_number(portfolio['sharpe_if_independent'])} "
+                "if the sleeves were independent"
+            )
+
     survivors = result.survivors()
     lines.append(
         f"\n{result.n_tested} symbol(s) tested · "

@@ -426,6 +426,146 @@ _SCREEN_COLUMNS: tuple[tuple[str, str, bool], ...] = (
 )
 
 
+def _sleeve_vs_asset_verdict(metrics: dict[str, float]) -> str:
+    """Say where the diversification came from - the names, or the models disagreeing.
+
+    A sleeve correlation well below the correlation of the shares it trades is
+    the reading most likely to be over-sold, so it gets the longest warning.
+    """
+    sleeve = metrics["mean_correlation"]
+    asset = metrics["mean_asset_correlation"]
+    if not np.isfinite(asset):
+        return (
+            "Buy-and-hold returns were not supplied, so there is no way to tell whether the "
+            "sleeves are less correlated than the shares they trade."
+        )
+
+    shares = (
+        f"The shares themselves correlate {format_number(asset, digits=2)}, and holding them "
+        f"at the same weights would be {format_number(metrics['asset_effective_bets'], digits=2)}"
+        " bet(s). "
+    )
+    if sleeve < asset - 0.1:
+        return shares + (
+            "The strategies are the less correlated of the two, which is not automatically "
+            "good news: sleeves decorrelate when the models are positioned differently, and "
+            "models that disagree at random look exactly like this. Read it as evidence of "
+            "diversification only once each sleeve has an edge worth diversifying - check the "
+            "`vs B&H` and `q` columns above first."
+        )
+    if sleeve > asset + 0.1:
+        return shares + (
+            "The strategies are **more** correlated than the shares they trade. Trading the "
+            "universe is concentrating risk that holding it would have spread."
+        )
+    return shares + (
+        "The strategies inherit roughly the correlation of the shares, so trading the universe "
+        "neither adds nor removes diversification relative to holding it."
+    )
+
+
+def _portfolio_section(report: Report, result: ScreenResult) -> None:
+    """Append what the ranking cannot say: how many bets these symbols really are.
+
+    Every row above is a standalone study. Held together they are not
+    independent, and the gap between the two readings is the whole point of
+    the section.
+    """
+    report.heading("Held together, not one at a time")
+    try:
+        portfolio = result.portfolio()
+    except ValueError as error:
+        report.text(f"These symbols cannot be combined into a portfolio: {error}.")
+        return
+
+    metrics = portfolio.metrics()
+    n_sleeves = int(metrics["n_sleeves"])
+    effective = metrics["effective_bets"]
+    if n_sleeves < 2:
+        report.text(
+            "A single evaluated symbol is a single bet; there is nothing here to diversify."
+        )
+        return
+
+    report.text(
+        f"Equally weighted, these **{n_sleeves} sleeves behave like "
+        f"{format_number(effective, digits=2)} independent bets**, against the "
+        f"{n_sleeves} that adding {n_sleeves} separate backtests together would assume. "
+        f"Their returns correlate {format_number(metrics['mean_correlation'], digits=2)} "
+        "on average."
+    )
+    report.text(_sleeve_vs_asset_verdict(metrics))
+
+    report.raw_table(
+        markdown_table(
+            ["quantity", "value"],
+            [
+                ["sleeves", str(n_sleeves)],
+                ["common trading days", f"{int(metrics['n_periods']):,}"],
+                [
+                    "share of the combined calendar",
+                    format_number(metrics["common_fraction"], percent=True),
+                ],
+                ["mean pairwise correlation (sleeves)", format_number(metrics["mean_correlation"])],
+                [
+                    "mean pairwise correlation (buy & hold)",
+                    format_number(metrics["mean_asset_correlation"]),
+                ],
+                ["max pairwise correlation (sleeves)", format_number(metrics["max_correlation"])],
+                ["diversification ratio", format_number(metrics["diversification_ratio"])],
+                ["effective number of bets", format_number(metrics["effective_bets"])],
+                [
+                    "effective bets from holding the shares instead",
+                    format_number(metrics["asset_effective_bets"]),
+                ],
+                ["portfolio Sharpe", format_number(metrics["sharpe"])],
+                [
+                    "Sharpe if the sleeves were independent",
+                    format_number(metrics["sharpe_if_independent"]),
+                ],
+                ["max drawdown", format_number(metrics["max_drawdown"], percent=True)],
+            ],
+        )
+    )
+
+    report.heading("Weights, and where the risk actually sits", level=3)
+    report.dataframe(portfolio.sleeve_table())
+    report.heading("Correlation of the sleeve returns", level=3)
+    report.dataframe(portfolio.correlation())
+    asset_correlation = portfolio.asset_correlation()
+    if asset_correlation is not None:
+        report.heading("Correlation of the shares themselves (buy & hold)", level=3)
+        report.dataframe(asset_correlation)
+
+    report.bullets(
+        [
+            "`effective number of bets` is the squared diversification ratio. For equally "
+            "weighted, equally volatile sleeves correlated at `rho` it is exactly "
+            "`n / (1 + (n - 1) * rho)`, so it reads as the count of independent positions "
+            "the correlation leaves you actually holding.",
+            "`Sharpe if the sleeves were independent` keeps the same returns and the same "
+            "weights and only removes the correlation. The distance between it and the "
+            "portfolio Sharpe is the diversification a four-backtest sum would have claimed "
+            "and this universe does not provide.",
+            "`risk_contribution` is each sleeve's share of portfolio variance. Equal capital "
+            "is not equal risk: read it against `weight` before concluding the allocation is "
+            "balanced.",
+            "Correlations are measured only on the days every sleeve traded - "
+            f"{format_number(metrics['common_fraction'], percent=True)} of the combined "
+            "calendar here. A holiday in one market is not a quiet day for that sleeve, so "
+            "filling it with a zero would flatter every number in this section.",
+            "Symbols in different time zones are matched by calendar date, and a date does "
+            "not mean the same hours in Taipei as it does in New York. A same-day "
+            "correlation across those two markets is understated, and the effective bet "
+            "count correspondingly flattered, because part of the shared move lands on the "
+            "next date for one of them.",
+            "Weights are fixed for the whole sample and no scheme here looks at the "
+            "correlation matrix. Fitting weights to the same correlations they are then "
+            "scored against would make this section a backtest of itself.",
+        ]
+    )
+
+
 def render_screen_report(result: ScreenResult, config: ExperimentConfig) -> str:
     """Rank a universe by how well one model trades each symbol.
 
@@ -502,6 +642,9 @@ def render_screen_report(result: ScreenResult, config: ExperimentConfig) -> str:
             )
         )
 
+    if ranked:
+        _portfolio_section(report, result)
+
     report.heading("The multiple-comparison correction")
     report.raw_table(
         markdown_table(
@@ -549,6 +692,8 @@ def render_screen_report(result: ScreenResult, config: ExperimentConfig) -> str:
             "holding that stock; nothing else in the row can rescue it.",
             "**Then `q`.** A symbol clearing both is a candidate for further work, not a "
             "signal to trade.",
+            "**Then the portfolio section.** Two symbols that each clear the bar are still "
+            "one bet if they move together.",
             *_reading_notes()[:2],
         ]
     )
@@ -557,6 +702,10 @@ def render_screen_report(result: ScreenResult, config: ExperimentConfig) -> str:
             "Screening the same universe repeatedly with different models or windows "
             "multiplies the selection problem again, and the FDR correction here only "
             "covers the symbols in this one run.",
+            "The portfolio section holds fixed weights over the whole sample and charges "
+            "nothing to rebalance between sleeves. Correlations are also not stable: they "
+            "rise in exactly the drawdowns the diversification was supposed to cushion, so "
+            "the effective bet count here is a full-sample average, not a promise.",
             *_caveats(),
         ]
     )
