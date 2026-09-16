@@ -125,6 +125,15 @@ Keep each item small enough to land in one reviewed pull request.
   makes the file byte-stable - the committed record now survives any number
   of no-op days unchanged. Found by a guard in the local daily runner that
   refused to commit a journal that was not an extension of the committed one.
+- [x] A local path for the daily update, for as long as Actions cannot run
+  (`scripts/daily_update.py`). The same fetch-record-score-commit loop the
+  workflow runs, keeping its ordering - the data is committed before a
+  download failure is allowed to go red - plus the guards a runner never
+  needed and a working tree does: it refuses to run off `main`, commits with
+  `--only` so staged work in progress cannot ride along to `main`, and
+  compares the journal against the committed version before committing,
+  aborting if any existing row moved. That last guard found the
+  `float_precision` defect on its first run against real data.
 - [x] The Makefile as the local gate, now that CI cannot run. `make check`
   runs exactly what `.github/workflows/ci.yml` runs, in the same order
   (lint, test, doctest, CLI smoke), in about 40 seconds. Closes two gaps that

@@ -199,6 +199,36 @@ vs backtest        claim 50.55% -> live 56.48%  (z = 1.2337)
 抓價是唯一無法離線測試的路徑，所以只要動到相關檔案，同一個 workflow
 就會在 PR 上以 dry run 執行（真的抓、但不 commit）。
 
+### Actions 跑不動時：在本機跑同一個迴圈
+
+```bash
+python3 scripts/daily_update.py             # 抓 → 記錄計分 → commit → push
+python3 scripts/daily_update.py --dry-run   # 前兩步照跑，不 commit 也不 push
+```
+
+workflow 停擺時日誌就**停止累積**，而這不只是閒置：`hit_rate_z` 需要的是獨立
+期距，而獨立期距只能一個交易日一個交易日地到。這支腳本就是那個 workflow，
+少了 runner，並保留它那個重要的順序——
+
+```
+抓價 → 記錄與計分 → commit → 然後才回報下載失敗
+```
+
+局部斷線不該賠掉已經抓到的 bar，所以資料先進 commit，這一輪才允許變紅。
+
+它另外加了 workflow 不需要、但筆電需要的三道保險。runner 從乾淨的 `main`
+checkout 開始，工作目錄不是：
+
+| 風險 | 處理 |
+|---|---|
+| 在錯的分支上 commit 當日資料 | 不在 `--branch`（預設 `main`）上就直接拒絕執行 |
+| 把暫存中的半成品一起推上 main | 用 `git commit --only`，其餘 staged 內容原封不動留著 |
+| 日誌被改寫 | commit 前比對 HEAD 版本，只要有任何一列變動就中止 |
+
+第三道是重點。日誌的每一列都在結果出現前就寫下了，**變動過的列就是用後見之明
+重算過的列**，而且事後從檔案上看不出來。這道檢查在第一次對真實資料執行時就
+攔下了一個真的缺陷（見 `load_journal` 的 `float_precision`）。
+
 ---
 
 ## 框架驗證：它會不會「無中生有」？
