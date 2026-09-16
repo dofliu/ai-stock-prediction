@@ -95,6 +95,17 @@ Keep each item small enough to land in one reviewed pull request.
   accuracy within each. Surfaced in the backtest report so a model whose edge
   only shows up in the calm tercile no longer looks the same as one that
   holds throughout.
+- [x] Fixed a silent rewrite of the forecast journal. `load_journal` read the
+  CSV with pandas' default float parser, which is fast rather than correctly
+  rounded and lands up to an ulp from the value the text denotes;
+  `append_forecasts` then rewrites the whole file, so every run wrote the
+  slightly-wrong float back and a row recorded before its outcome existed
+  stopped being the row that was recorded. Too small to move any statistic,
+  and that is exactly the problem: the journal's whole claim is that it is
+  append-only, and it was not. Reading with `float_precision="round_trip"`
+  makes the file byte-stable - the committed record now survives any number
+  of no-op days unchanged. Found by a guard in the local daily runner that
+  refused to commit a journal that was not an extension of the committed one.
 
 ## Rejected, and why
 
