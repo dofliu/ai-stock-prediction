@@ -9,6 +9,17 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Now
 
+- [ ] **A local path for the daily update, while Actions cannot run.** The
+  GitHub Actions quota is exhausted, so `daily-prices.yml` has not run since
+  2026-09-13 and the journal has stopped accumulating - it is frozen at 15
+  matured forecasts covering *one* independent horizon, which is not enough to
+  conclude anything and never will be while the feed is dead. Everything the
+  workflow does after the download already runs offline; what is missing is a
+  documented one-command way to run the fetch-record-score-commit loop on a
+  developer machine, and a note on what makes it safe to do by hand (never
+  regenerate journal rows, never backfill a day that was missed). Without this
+  the project's only untunable score is simply paused.
+
 ## Next
 
 - [ ] **Effective sample size for `ic_fold_t`.** The journal's `hit_rate_z` now
@@ -95,6 +106,15 @@ Keep each item small enough to land in one reviewed pull request.
   accuracy within each. Surfaced in the backtest report so a model whose edge
   only shows up in the calm tercile no longer looks the same as one that
   holds throughout.
+- [x] The Makefile as the local gate, now that CI cannot run. `make check`
+  runs exactly what `.github/workflows/ci.yml` runs, in the same order
+  (lint, test, doctest, CLI smoke), in about 40 seconds. Closes two gaps that
+  were harmless while CI was the real gate and are not any more: `make lint`
+  covered `src tests` but not `scripts`, and `make test` ran none of the 14
+  doctests, because `testpaths` is `tests` and they live under `src`. Also
+  fixes a `make clean` that ran `rm -rf data` - which is `data/journal/`,
+  the record that cannot be regenerated, and which `.gitignore` goes out of
+  its way to preserve. `tests/test_makefile.py` pins all of it.
 
 ## Rejected, and why
 
