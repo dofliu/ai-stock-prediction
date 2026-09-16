@@ -9,8 +9,27 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Now
 
+- [ ] **A local path for the daily update, while Actions cannot run.** The
+  GitHub Actions quota is exhausted, so `daily-prices.yml` has not run since
+  2026-09-13 and the journal has stopped accumulating - it is frozen at 15
+  matured forecasts covering *one* independent horizon, which is not enough to
+  conclude anything and never will be while the feed is dead. Everything the
+  workflow does after the download already runs offline; what is missing is a
+  documented one-command way to run the fetch-record-score-commit loop on a
+  developer machine, and a note on what makes it safe to do by hand (never
+  regenerate journal rows, never backfill a day that was missed). Without this
+  the project's only untunable score is simply paused.
+
 ## Next
 
+- [ ] **Fail the daily workflow on a stale feed.** `data_freshness` now reports
+  a stopped feed, but only to whoever reads the output.
+  `.github/workflows/daily-prices.yml` already fails when a *symbol* fails to
+  download; it does not fail when every download "succeeds" and returns nothing
+  new. A `--fail-if-stale` flag on `ai-stock journal`, wired into the workflow
+  after the commit step, would turn the observation into an alarm. Deliberately
+  left out of the reporting change so that the flag lands with the workflow
+  wiring it needs, rather than as an unused option.
 - [ ] **Effective sample size for `ic_fold_t`.** The journal's `hit_rate_z` now
   divides by non-overlapping horizon blocks rather than by row count, but
   `ic_fold_t` still carries the optimistic degrees of freedom that limitation 4
@@ -106,6 +125,23 @@ Keep each item small enough to land in one reviewed pull request.
   makes the file byte-stable - the committed record now survives any number
   of no-op days unchanged. Found by a guard in the local daily runner that
   refused to commit a journal that was not an extension of the committed one.
+- [x] The Makefile as the local gate, now that CI cannot run. `make check`
+  runs exactly what `.github/workflows/ci.yml` runs, in the same order
+  (lint, test, doctest, CLI smoke), in about 40 seconds. Closes two gaps that
+  were harmless while CI was the real gate and are not any more: `make lint`
+  covered `src tests` but not `scripts`, and `make test` ran none of the 14
+  doctests, because `testpaths` is `tests` and they live under `src`. Also
+  fixes a `make clean` that ran `rm -rf data` - which is `data/journal/`,
+  the record that cannot be regenerated, and which `.gitignore` goes out of
+  its way to preserve. `tests/test_makefile.py` pins all of it.
+- [x] Data freshness in the journal (`ai_stock.journal.data_freshness`): the
+  age of each symbol's most recent bar, stated in the report and on the CLI
+  above the performance it qualifies. Found while diagnosing a three-day
+  outage in the daily workflow - the journal had gone on reporting an 80% hit
+  rate from bars that stopped arriving on 2026-09-11, because a stopped feed
+  does not make this report go quiet, it makes it repeat. Calendar days, not
+  trading days, so a long market holiday reads as behind; that is the cheap
+  direction to be wrong in.
 
 ## Rejected, and why
 
