@@ -36,6 +36,7 @@ from ai_stock.journal import (
     MIN_TRAIN_ROWS,
     append_forecasts,
     compare_with_backtest,
+    data_freshness,
     load_journal,
     record_forecasts,
     rolling_compare_with_backtest,
@@ -423,6 +424,18 @@ def _echo(message: str, *, quiet: bool) -> None:
         print(message)
 
 
+def _freshness_line(freshness: pd.DataFrame) -> str:
+    """One line on how current the prices are, flagged when any symbol is behind."""
+    if freshness.empty:
+        return "no symbols loaded"
+    readable = freshness["last_bar"].dropna()
+    stamp = str(readable.max()) if not readable.empty else "unknown"
+    behind = sorted(freshness.index[freshness["stale"]])
+    if not behind:
+        return stamp
+    return f"{stamp}  (STALE: {', '.join(map(str, behind))} - check the downloader)"
+
+
 # --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
@@ -673,6 +686,7 @@ def _command_journal(args: argparse.Namespace) -> int:
         skipped = sorted(set(universe) - {f.symbol for f in recorded})
 
     live = score_journal(load_journal(args.journal), universe, config)
+    freshness = data_freshness(universe)
 
     comparisons: dict[str, dict[str, float]] = {}
     rolling = None
@@ -705,6 +719,7 @@ def _command_journal(args: argparse.Namespace) -> int:
             rolling=rolling,
             recorded=len(recorded),
             skipped=skipped,
+            freshness=freshness,
         )
         _write(args.out / f"journal_{args.model}.md", report)
         if not live.scored.empty:
@@ -714,6 +729,7 @@ def _command_journal(args: argparse.Namespace) -> int:
     metrics = live.metrics()
     lines = [
         f"journal            {args.journal}",
+        f"data as of         {_freshness_line(freshness)}",
         f"recorded today     {len(recorded)}"
         + (f"  (skipped: {', '.join(skipped)})" if skipped else ""),
         f"scored / pending   {int(metrics['n_scored'])} / {int(metrics['n_pending'])}",
