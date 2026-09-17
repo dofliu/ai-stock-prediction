@@ -724,6 +724,8 @@ def test_repeated_recording_never_drifts(tmp_path: Path) -> None:
         append_forecasts(path, [duplicate])
 
     assert path.read_text(encoding="utf-8") == _FULL_PRECISION_ROW
+
+
 # Data freshness
 # --------------------------------------------------------------------------- #
 

@@ -9,16 +9,28 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Now
 
-- [ ] **A local path for the daily update, while Actions cannot run.** The
-  GitHub Actions quota is exhausted, so `daily-prices.yml` has not run since
-  2026-09-13 and the journal has stopped accumulating - it is frozen at 15
-  matured forecasts covering *one* independent horizon, which is not enough to
-  conclude anything and never will be while the feed is dead. Everything the
-  workflow does after the download already runs offline; what is missing is a
-  documented one-command way to run the fetch-record-score-commit loop on a
-  developer machine, and a note on what makes it safe to do by hand (never
-  regenerate journal rows, never backfill a day that was missed). Without this
-  the project's only untunable score is simply paused.
+- [ ] **Restore GitHub Actions minutes. Not a code item - nobody here can fix
+  it by writing anything.** This repository is private, so Actions minutes are
+  metered, and the included quota is spent. The signature is unmistakable once
+  you know it: *every* workflow - `ci.yml` as much as `daily-prices.yml`, on
+  push, `pull_request` and `schedule` alike - fails after three to five
+  seconds with `runner_id: 0` and no downloadable logs, because no runner was
+  ever assigned. No step ran, so no step can be debugged. Last green run of
+  anything: 2026-09-13.
+
+  Three ways out, all of them the repository owner's to take: raise the
+  spending limit under <https://github.com/settings/billing>, make the
+  repository public (standard runners are unmetered for public repositories),
+  or wait for the monthly reset. Until one of them happens, `make check` is
+  the gate (see below) and `scripts/daily_update.py` is the feed.
+
+  What it is costing, so that the cost is on the record rather than in
+  someone's memory: the journal has been frozen since 2026-09-11 at 15 matured
+  forecasts covering **one** independent horizon. Independent horizons arrive
+  one trading day at a time and cannot be backfilled, because a forecast
+  written today about a day that has already happened is not a forecast. Every
+  day the feed stays down is a day the only untunable number here does not
+  earn.
 
 ## Next
 
@@ -29,7 +41,9 @@ Keep each item small enough to land in one reviewed pull request.
   new. A `--fail-if-stale` flag on `ai-stock journal`, wired into the workflow
   after the commit step, would turn the observation into an alarm. Deliberately
   left out of the reporting change so that the flag lands with the workflow
-  wiring it needs, rather than as an unused option.
+  wiring it needs, rather than as an unused option. Note that this alarm would
+  not have caught the current outage: it fires from inside a job, and the
+  quota failure means no job ever starts.
 - [ ] **Effective sample size for `ic_fold_t`.** The journal's `hit_rate_z` now
   divides by non-overlapping horizon blocks rather than by row count, but
   `ic_fold_t` still carries the optimistic degrees of freedom that limitation 4
@@ -125,6 +139,15 @@ Keep each item small enough to land in one reviewed pull request.
   makes the file byte-stable - the committed record now survives any number
   of no-op days unchanged. Found by a guard in the local daily runner that
   refused to commit a journal that was not an extension of the committed one.
+- [x] A local path for the daily update, for as long as Actions cannot run
+  (`scripts/daily_update.py`). The same fetch-record-score-commit loop the
+  workflow runs, keeping its ordering - the data is committed before a
+  download failure is allowed to go red - plus the guards a runner never
+  needed and a working tree does: it refuses to run off `main`, commits with
+  `--only` so staged work in progress cannot ride along to `main`, and
+  compares the journal against the committed version before committing,
+  aborting if any existing row moved. That last guard found the
+  `float_precision` defect on its first run against real data.
 - [x] The Makefile as the local gate, now that CI cannot run. `make check`
   runs exactly what `.github/workflows/ci.yml` runs, in the same order
   (lint, test, doctest, CLI smoke), in about 40 seconds. Closes two gaps that
