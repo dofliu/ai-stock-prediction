@@ -34,6 +34,7 @@ from ai_stock.config import (
 from ai_stock.data.loaders import save_csv
 from ai_stock.journal import (
     MIN_TRAIN_ROWS,
+    STALE_AFTER_DAYS,
     append_forecasts,
     compare_with_backtest,
     data_freshness,
@@ -41,6 +42,7 @@ from ai_stock.journal import (
     record_forecasts,
     rolling_compare_with_backtest,
     score_journal,
+    stale_symbols,
 )
 from ai_stock.models.registry import available_models
 from ai_stock.pipeline import (
@@ -317,6 +319,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=30,
         help="matured forecasts per point when tracking hit_rate_z over time",
     )
+    journal.add_argument(
+        "--fail-if-stale",
+        type=int,
+        nargs="?",
+        const=STALE_AFTER_DAYS,
+        default=None,
+        metavar="DAYS",
+        help=(
+            f"exit {STALE_FEED_EXIT_CODE} if no symbol has a bar newer than DAYS "
+            f"calendar days (bare flag: {STALE_AFTER_DAYS}). The report is written "
+            "and printed first, so the alarm never costs the day's output"
+        ),
+    )
     _data_options(journal, multi=True)
     for add_options in (
         _feature_options,
@@ -422,6 +437,24 @@ def _write(path: Path, content: str) -> Path:
 def _echo(message: str, *, quiet: bool) -> None:
     if not quiet:
         print(message)
+
+
+STALE_FEED_EXIT_CODE = 3
+"""Exit code for ``journal --fail-if-stale`` when the price feed has stopped.
+
+Distinct from the ``2`` :func:`main` uses for a crash, because the two need
+opposite responses: ``2`` means this command is broken, ``3`` means it ran
+correctly and the *data underneath it* is not moving. A caller that cannot tell
+them apart will eventually paper over one with a fix for the other.
+"""
+
+
+def _age_label(age_days: float) -> str:
+    """A bar's age for the stale-feed message: whole days, or why there is no age."""
+    age = float(age_days)
+    if not np.isfinite(age):
+        return "no readable bar"
+    return f"{int(age)}d"
 
 
 def _freshness_line(freshness: pd.DataFrame) -> str:
@@ -749,6 +782,25 @@ def _command_journal(args: argparse.Namespace) -> int:
             f" naive z = {format_number(pooled['hit_rate_z_naive'])})"
         )
     _echo("\n".join(lines), quiet=args.quiet)
+
+    # Last, on purpose. Everything above has already been written and printed,
+    # so going red costs nothing that was produced this run - the same ordering
+    # daily-prices.yml uses when it commits the day's bars before reporting a
+    # download failure.
+    if args.fail_if_stale is not None:
+        behind = stale_symbols(freshness, older_than_days=args.fail_if_stale)
+        if freshness.empty:
+            print("stale feed: no symbols loaded", file=sys.stderr)
+            return STALE_FEED_EXIT_CODE
+        if behind:
+            detail = ", ".join(
+                f"{symbol} ({_age_label(freshness.loc[symbol, 'age_days'])})" for symbol in behind
+            )
+            print(
+                f"stale feed: no bar newer than {args.fail_if_stale} day(s) for {detail}",
+                file=sys.stderr,
+            )
+            return STALE_FEED_EXIT_CODE
     return 0
 
 

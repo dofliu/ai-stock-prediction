@@ -41,6 +41,7 @@ __all__ = [
     "record_forecasts",
     "rolling_compare_with_backtest",
     "score_journal",
+    "stale_symbols",
 ]
 
 JOURNAL_COLUMNS = (
@@ -430,6 +431,45 @@ def data_freshness(
     frame = pd.DataFrame(rows, columns=columns).set_index("symbol")
     frame["stale"] = frame["stale"].astype(bool)
     return frame
+
+
+def stale_symbols(freshness: pd.DataFrame, *, older_than_days: float) -> list[str]:
+    """Symbols in ``freshness`` whose most recent bar is older than ``older_than_days``.
+
+    Deliberately re-derives the verdict from ``age_days`` rather than reading the
+    ``stale`` column, so the caller can ask a *different* question from the one
+    :func:`data_freshness` answered. The two have different costs of being
+    wrong. The ``stale`` column is read by a person glancing at a report, where
+    a needless "check the feed" costs a glance, so it fires early
+    (:data:`STALE_AFTER_DAYS`, four days). This function backs an exit code,
+    which fires a build failure that someone has to triage, and an alarm that
+    cries wolf every Lunar New Year - when the Taiwan market is legitimately
+    shut for up to nine calendar days - is an alarm that gets muted. Callers
+    wiring up an alarm should pass a threshold wide enough to clear the longest
+    holiday in their universe's calendars.
+
+    Symbols whose feed could not be read carry an infinite ``age_days`` and so
+    are reported at every threshold, which is the intended reading: an
+    unreadable feed is not a fresh one.
+
+    >>> import pandas as pd
+    >>> bars = pd.DataFrame(
+    ...     {"close": [1.0, 2.0]},
+    ...     index=pd.to_datetime(["2026-01-05", "2026-01-06"]),
+    ... )
+    >>> frame = data_freshness({"X": bars}, asof=pd.Timestamp("2026-01-13"))
+    >>> bool(frame.loc["X", "stale"])  # the report says behind, at four days
+    True
+    >>> stale_symbols(frame, older_than_days=4)
+    ['X']
+    >>> stale_symbols(frame, older_than_days=10)  # a holiday this long is normal
+    []
+    """
+    if freshness.empty:
+        return []
+    ages = pd.to_numeric(freshness["age_days"], errors="coerce")
+    behind = freshness.index[ages.isna() | (ages > float(older_than_days))]
+    return sorted(str(symbol) for symbol in behind)
 
 
 def _size_position(

@@ -416,6 +416,118 @@ def test_journal_writes_a_report(tmp_path: Path) -> None:
     assert "far too few to say anything" in report
 
 
+def _write_current_universe(folder: Path, *, ends_days_ago: int = 0, n_days: int = 700) -> None:
+    """A universe whose last bar is `ends_days_ago` days old.
+
+    `_write_universe` ends in 2012, which is exactly what the stale tests want
+    and exactly what a "does not fire when healthy" test cannot use.
+    """
+    from dataclasses import replace as _replace
+
+    from ai_stock.config import SyntheticConfig
+    from ai_stock.data.loaders import save_csv
+    from ai_stock.data.synthetic import generate_ohlcv
+
+    last_bar = pd.Timestamp.today().normalize() - pd.Timedelta(days=ends_days_ago)
+    base = SyntheticConfig(n_days=n_days, seed=5)
+    for symbol, seed in (("AAA", 11), ("BBB", 22)):
+        frame = generate_ohlcv(_replace(base, seed=seed))
+        frame.index = pd.date_range(end=last_bar, periods=len(frame))
+        frame.index.name = "date"
+        save_csv(frame, folder / f"{symbol}.csv")
+
+
+def _journal_argv(folder: Path, journal: Path, *extra: str) -> list[str]:
+    return [
+        "journal",
+        "--data",
+        str(folder),
+        "--model",
+        "ridge",
+        "--journal",
+        str(journal),
+        "--min-train-rows",
+        "300",
+        "--no-compare",
+        "--quiet",
+        *extra,
+    ]
+
+
+def test_journal_fail_if_stale_exits_three_on_a_stopped_feed(tmp_path: Path, capsys) -> None:
+    """The alarm the report could only ever whisper.
+
+    `_write_universe` ends in 2012. Without the flag that reads as an ordinary
+    green run with a note in the output; with it the process exits non-zero, so
+    a scheduler can act on a feed that quietly stopped returning new bars.
+    """
+    folder = tmp_path / "prices"
+    _write_universe(folder)
+
+    code = main(_journal_argv(folder, tmp_path / "f.csv", "--fail-if-stale"))
+
+    assert code == 3
+    err = capsys.readouterr().err
+    assert "stale feed" in err
+    assert "AAA" in err and "BBB" in err
+
+
+def test_journal_fail_if_stale_is_quiet_on_a_current_feed(tmp_path: Path, capsys) -> None:
+    """An alarm that fires on a healthy feed is an alarm that gets muted."""
+    folder = tmp_path / "prices"
+    _write_current_universe(folder)
+
+    code = main(_journal_argv(folder, tmp_path / "f.csv", "--fail-if-stale"))
+
+    assert code == 0
+    assert "stale feed" not in capsys.readouterr().err
+
+
+def test_journal_fail_if_stale_accepts_its_own_threshold(tmp_path: Path) -> None:
+    """The workflow sets this wider than the report's four days, on purpose.
+
+    The Taiwan market shuts for up to nine calendar days over Lunar New Year, so
+    the build alarm has to be able to sit further out than the line a person
+    reads in the report.
+    """
+    folder = tmp_path / "prices"
+    _write_current_universe(folder, ends_days_ago=6)
+
+    assert main(_journal_argv(folder, tmp_path / "a.csv", "--fail-if-stale", "10")) == 0
+    assert main(_journal_argv(folder, tmp_path / "b.csv", "--fail-if-stale", "3")) == 3
+    # And the bare flag still means the report's own four days.
+    assert main(_journal_argv(folder, tmp_path / "c.csv", "--fail-if-stale")) == 3
+
+
+def test_journal_stays_green_on_a_stale_feed_without_the_flag(tmp_path: Path) -> None:
+    """Opt-in: the exit code must not change for anyone who did not ask for it."""
+    folder = tmp_path / "prices"
+    _write_universe(folder)
+
+    assert main(_journal_argv(folder, tmp_path / "f.csv")) == 0
+
+
+def test_journal_fail_if_stale_still_writes_the_report(tmp_path: Path) -> None:
+    """The ordering the workflow depends on: going red must cost nothing.
+
+    daily-prices.yml commits the day's bars before it is allowed to fail, and
+    that only works if the failing command has already produced its output. A
+    stale-feed exit that skipped the report would throw away the run it was
+    complaining about.
+    """
+    folder = tmp_path / "prices"
+    _write_universe(folder)
+    out = tmp_path / "reports"
+    journal = tmp_path / "f.csv"
+
+    code = main(_journal_argv(folder, journal, "--fail-if-stale", "--out", str(out)))
+
+    assert code == 3
+    report = (out / "journal_ridge.md").read_text(encoding="utf-8")
+    assert report.startswith("# Forecast journal")
+    assert journal.exists(), "the day's forecast must be recorded before the alarm"
+
+
 def test_journal_without_a_source_exits_with_code_two(capsys) -> None:
     with pytest.raises(SystemExit) as excinfo:
         main(["journal", "--model", "ridge"])
