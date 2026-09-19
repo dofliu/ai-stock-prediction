@@ -34,16 +34,6 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Next
 
-- [ ] **Fail the daily workflow on a stale feed.** `data_freshness` now reports
-  a stopped feed, but only to whoever reads the output.
-  `.github/workflows/daily-prices.yml` already fails when a *symbol* fails to
-  download; it does not fail when every download "succeeds" and returns nothing
-  new. A `--fail-if-stale` flag on `ai-stock journal`, wired into the workflow
-  after the commit step, would turn the observation into an alarm. Deliberately
-  left out of the reporting change so that the flag lands with the workflow
-  wiring it needs, rather than as an unused option. Note that this alarm would
-  not have caught the current outage: it fires from inside a job, and the
-  quota failure means no job ever starts.
 - [ ] **Effective sample size for `ic_fold_t`.** The journal's `hit_rate_z` now
   divides by non-overlapping horizon blocks rather than by row count, but
   `ic_fold_t` still carries the optimistic degrees of freedom that limitation 4
@@ -72,6 +62,19 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Done
 
+- [x] Fail the daily workflow on a stale feed. `ai-stock journal
+  --fail-if-stale [DAYS]` exits 3 when no symbol has a bar newer than DAYS,
+  turning `data_freshness`'s observation into an alarm a scheduler can act on.
+  Wired into `daily-prices.yml` after the commit step, behind
+  `continue-on-error`, so a stopped feed can never cost the bars that did
+  arrive. The alarm carries its own threshold (10 days in the workflow) rather
+  than reusing the report's four: the report is read by a person, where a
+  needless glance is cheap, while this one fails a build, and the Taiwan
+  market shuts for up to nine calendar days over Lunar New Year. Exit code 3
+  is distinct from the 2 used for a crash, because "this command is broken"
+  and "the data underneath it stopped moving" need opposite responses. Note
+  what it does *not* cover, which is the outage in progress: this fires from
+  inside a job, and a quota failure means no job ever starts.
 - [x] Core pipeline: synthetic market, causal features, walk-forward with
   embargo, cost-aware backtest, Monte Carlo, reports, CLI. (#1)
 - [x] Horizon-aware labelling of the simulate summary. (#2)

@@ -25,6 +25,7 @@ from ai_stock.journal import (
     record_forecasts,
     rolling_compare_with_backtest,
     score_journal,
+    stale_symbols,
 )
 
 
@@ -794,3 +795,66 @@ def test_data_freshness_threshold_is_configurable() -> None:
 
     assert not lenient.loc["AAA", "stale"]
     assert strict.loc["AAA", "stale"]
+
+
+# Stale-feed alarm
+# --------------------------------------------------------------------------- #
+
+
+def test_stale_symbols_lists_only_the_symbols_past_the_threshold() -> None:
+    universe = {
+        "AAA": _bars(["2026-01-06"]),
+        "BBB": _bars(["2026-01-02"]),
+        "CCC": _bars(["2026-01-05"]),
+    }
+    frame = data_freshness(universe, asof=pd.Timestamp("2026-01-09"))
+
+    assert stale_symbols(frame, older_than_days=5) == ["BBB"]
+
+
+def test_stale_symbols_asks_a_different_question_from_the_report_column() -> None:
+    """The property the alarm exists for: it is not just `frame["stale"]` renamed.
+
+    The report flags a feed at four days because a needless glance is cheap. The
+    alarm fails a build, so it must be able to sit further out - far enough to
+    clear a Lunar New Year closure - without the report going quiet in the
+    meantime. If this ever collapses back onto the `stale` column, the workflow
+    goes red every February.
+    """
+    universe = {"AAA": _bars(["2026-01-06"])}
+    frame = data_freshness(universe, asof=pd.Timestamp("2026-01-14"))
+
+    assert frame.loc["AAA", "stale"], "the report should already be flagging this"
+    assert stale_symbols(frame, older_than_days=4) == ["AAA"]
+    assert stale_symbols(frame, older_than_days=10) == []
+
+
+def test_stale_symbols_reports_an_unreadable_feed_at_every_threshold() -> None:
+    """An infinite age is not a large number to be tolerated - it is no answer."""
+    universe = {"AAA": _bars(["2026-01-06"]), "BBB": _bars([])}
+    frame = data_freshness(universe, asof=pd.Timestamp("2026-01-07"))
+
+    assert stale_symbols(frame, older_than_days=4) == ["BBB"]
+    assert stale_symbols(frame, older_than_days=10_000) == ["BBB"]
+
+
+def test_stale_symbols_is_sorted_and_stable() -> None:
+    universe = {name: _bars(["2026-01-02"]) for name in ("ZZZ", "AAA", "MMM")}
+    frame = data_freshness(universe, asof=pd.Timestamp("2026-01-20"))
+
+    assert stale_symbols(frame, older_than_days=4) == ["AAA", "MMM", "ZZZ"]
+
+
+def test_stale_symbols_is_empty_for_an_empty_frame() -> None:
+    """No symbols is not the same claim as no stale symbols - the caller decides."""
+    assert stale_symbols(data_freshness({}), older_than_days=4) == []
+
+
+def test_stale_symbols_is_exclusive_at_the_threshold() -> None:
+    """`older_than_days=4` means strictly older, matching `data_freshness`."""
+    universe = {"AAA": _bars(["2026-01-05"])}
+    frame = data_freshness(universe, asof=pd.Timestamp("2026-01-09"))
+
+    assert frame.loc["AAA", "age_days"] == pytest.approx(4.0)
+    assert stale_symbols(frame, older_than_days=4) == []
+    assert stale_symbols(frame, older_than_days=3) == ["AAA"]

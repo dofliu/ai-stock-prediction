@@ -66,7 +66,18 @@ jobs:
             tail -1 "$f"
           done
 
+      # Same bargain as the fetch step: the day's forecast must be recorded and
+      # committed before the run is allowed to go red. `--fail-if-stale` exits 3
+      # only after the report is written, and that exit is surfaced below.
+      #
+      # 10 days, not the 4 the report flags at. The report is read by a person,
+      # where a needless "check the feed" costs a glance; this exit fails a
+      # build. The Taiwan market shuts for up to nine calendar days over Lunar
+      # New Year, and an alarm that goes off every February is one nobody reads
+      # by March.
       - name: Record today's forecasts and score the matured ones
+        id: journal
+        continue-on-error: true
         run: |
           ai-stock journal \
             --data data/prices \
@@ -75,6 +86,7 @@ jobs:
             --journal data/journal/forecasts.csv \
             --cost-bps 2 --slippage-bps 3 \
             --no-compare \
+            --fail-if-stale 10 \
             --out reports
 
       - name: Upload the journal report
@@ -105,4 +117,14 @@ jobs:
         if: steps.fetch.outcome == 'failure'
         run: |
           echo "::error::one or more symbols failed to download - see the Fetch prices step"
+          exit 1
+
+      # The failure mode the step above cannot see: every download "succeeds"
+      # and returns nothing new. The journal then keeps maturing the same
+      # forecasts against the same bars and reports the same hit rate, looking
+      # exactly like a healthy quiet week.
+      - name: Fail if the price feed has stopped
+        if: steps.journal.outcome == 'failure'
+        run: |
+          echo "::error::the journal step failed - a stale feed (exit 3) or a real error; see its log"
           exit 1
