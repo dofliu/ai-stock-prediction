@@ -22,6 +22,15 @@ the sign of the correlation while most individual folds are positive - a
 textbook Simpson's paradox. :meth:`WalkForwardResult.metrics` therefore reports
 the pooled IC *and* the per-fold IC mean, its dispersion and a t-statistic.
 When the two disagree, believe the per-fold numbers.
+
+**How many folds is that, really.** The per-fold t-statistic divides by the
+square root of a sample size, and the number of folds is only that sample size
+when the folds do not share market. Two things in the schedule make them share
+it: ``step`` below ``test_size`` overlaps the test windows outright, and a
+``horizon``-day target makes even abutting windows share ``horizon - 1`` bars
+of outcome. :meth:`WalkForwardResult.independent_folds` counts the fold-widths
+of distinct market the schedule actually reaches, and ``ic_fold_t`` divides by
+that; ``ic_fold_t_naive`` keeps the old per-fold count beside it.
 """
 
 from __future__ import annotations
@@ -48,6 +57,49 @@ __all__ = [
 ]
 
 ModelFactory = Callable[[], Model]
+
+
+def _covered_window_ratio(starts: np.ndarray, ends: np.ndarray) -> float:
+    """How many average-width windows the union of ``[start, end)`` spans covers.
+
+    The generalisation of :func:`ai_stock.journal.independent_blocks` to windows
+    that are wider than one recording step: there, ``n`` forecasts recorded one
+    day apart against an ``h``-day horizon cover ``n / h`` blocks; here, folds
+    recurring every ``step`` bars and each scoring ``width`` bars of outcome
+    cover ``n * step / width`` of them. Stated as covered span over mean width
+    so that uneven folds need no special case.
+
+    The result is bounded by construction: the union can never exceed the sum
+    of the widths, so the ratio never exceeds ``len(starts)``, and it can never
+    fall below one, because the union is at least as wide as the widest window.
+
+    Disjoint windows count once each:
+
+    >>> _covered_window_ratio(np.array([0, 129, 258]), np.array([129, 258, 387]))
+    3.0
+
+    Windows that almost entirely coincide count as barely more than one:
+
+    >>> round(_covered_window_ratio(np.array([0, 1, 2]), np.array([129, 130, 131])), 4)
+    1.0155
+    """
+    if len(starts) == 0:
+        return 0.0
+    order = np.argsort(starts, kind="stable")
+    covered = 0
+    merged_start, merged_end = int(starts[order[0]]), int(ends[order[0]])
+    for index in order[1:]:
+        start, end = int(starts[index]), int(ends[index])
+        if start > merged_end:
+            covered += merged_end - merged_start
+            merged_start, merged_end = start, end
+        else:
+            merged_end = max(merged_end, end)
+    covered += merged_end - merged_start
+    mean_width = float(np.mean(ends.astype(float) - starts.astype(float)))
+    if mean_width <= 0.0:
+        return float(len(starts))
+    return float(covered) / mean_width
 
 
 @dataclass(frozen=True)
@@ -98,6 +150,12 @@ class WalkForwardResult:
     feature_importance_std: pd.Series | None = None
     realised_volatility: pd.Series | None = None
     """Trailing annualised volatility at each prediction, for :meth:`regime_metrics`."""
+    horizon: int = 1
+    """Bars between a prediction and the price it is scored against.
+
+    Kept on the result because :meth:`independent_folds` needs it: it is what
+    makes two abutting test windows share outcome bars.
+    """
 
     def __len__(self) -> int:
         return len(self.predictions)
@@ -124,6 +182,50 @@ class WalkForwardResult:
         frame = pd.DataFrame({"mean": mean, "std": std, "cv": cv})
         return frame.reindex(mean.abs().sort_values(ascending=False).index)
 
+    def independent_folds(self) -> float:
+        """How many fold-widths of distinct market the schedule actually reaches.
+
+        ``ic_fold_t`` divides by the square root of a sample size, and the fold
+        count is that sample size only when the folds do not share market.
+        Two things in the schedule make them share it, and both are properties
+        of the schedule rather than of the returns:
+
+        **Overlapping test windows.** ``step`` defaults to ``test_size``, which
+        makes consecutive test windows abut. Set it smaller and they overlap:
+        at ``step=1`` every fold re-scores almost the same window, so twenty
+        folds are one observation reported twenty times.
+        :func:`run_walk_forward` already warns that this inflates the *pooled*
+        sample size; the t-statistic across folds had the same problem and did
+        not say so.
+
+        **The label tail.** With a ``horizon``-day target the last bar of a
+        test window is scored against a price ``horizon`` bars later, which
+        falls inside the next window. Even abutting folds therefore share
+        ``horizon - 1`` bars of outcome - the overlapping-signal limitation, at
+        the fold boundary instead of at every bar.
+
+        Each fold contributes the half-open span ``[test_start, test_end +
+        horizon)``, and the count is the union of those spans over their mean
+        width. Like :func:`ai_stock.journal.independent_blocks`, it estimates
+        no correlation, so there is nothing here to tune or to get wrong; and
+        the same way, it errs low - fold positions are taken from the pooled
+        prediction calendar, which omits the bars between test windows when
+        ``step > test_size``, so well-separated folds read as merely adjacent.
+
+        On the default schedule the answer is close to the fold count: abutting
+        windows of 125 bars sharing a 5-day tail lose about a third of a fold
+        across ten of them. It is a small correction where ``step`` is left
+        alone and a large one where it is not.
+        """
+        if not self.folds:
+            return 0.0
+        calendar = self.predictions.index
+        starts = calendar.get_indexer([fold.test_start for fold in self.folds])
+        ends = calendar.get_indexer([fold.test_end for fold in self.folds])
+        if (starts < 0).any() or (ends < 0).any():
+            return float(len(self.folds))
+        return _covered_window_ratio(starts, ends + max(int(self.horizon), 1))
+
     def metrics(self) -> dict[str, float]:
         """Predictive metrics, pooled across folds and aggregated per fold.
 
@@ -131,9 +233,10 @@ class WalkForwardResult:
         ``ic_fold_mean``/``ic_fold_t`` average the per-fold information
         coefficients. The per-fold view is the trustworthy one: it is immune to
         the regime-scale effect described in this module's docstring.
-        ``ic_fold_t`` is the classic information ratio of the IC,
-        ``mean / std * sqrt(n_folds)``; roughly ``|t| > 2`` is the usual bar
-        for taking a measured edge seriously.
+        ``ic_fold_t`` is the information ratio of the IC,
+        ``mean / std * sqrt(ic_fold_n_eff)``, where the sample size is
+        :meth:`independent_folds` rather than the raw fold count; roughly
+        ``|t| > 2`` is the usual bar for taking a measured edge seriously.
         """
         summary = regression_metrics(self.forward_return, self.predictions)
         summary.update(classification_metrics(self.direction, self.predictions))
@@ -142,11 +245,20 @@ class WalkForwardResult:
         return summary
 
     def fold_summary(self) -> dict[str, float]:
-        """Aggregate the per-fold information coefficients."""
+        """Aggregate the per-fold information coefficients.
+
+        ``ic_fold_t`` is measured at :meth:`independent_folds`, and
+        ``ic_fold_t_naive`` at the raw fold count - the figure this summary
+        used to report on its own. The pair brackets the honest answer the
+        same way ``hit_rate_z`` and ``hit_rate_z_naive`` do in the forecast
+        journal, and while they disagree, believe the smaller.
+        """
         empty = {
             "ic_fold_mean": float("nan"),
             "ic_fold_std": float("nan"),
+            "ic_fold_n_eff": float("nan"),
             "ic_fold_t": float("nan"),
+            "ic_fold_t_naive": float("nan"),
             "ic_fold_positive_rate": float("nan"),
         }
         frame = self.fold_metrics()
@@ -158,15 +270,19 @@ class WalkForwardResult:
 
         mean = float(values.mean())
         deviation = float(values.std(ddof=1)) if len(values) > 1 else float("nan")
-        t_stat = (
-            mean / deviation * np.sqrt(len(values))
-            if deviation and np.isfinite(deviation) and deviation > 1e-12
-            else float("nan")
-        )
+        # Folds whose IC could not be computed are not folds this t-statistic
+        # rests on, so the effective count is scaled down by the same fraction
+        # the dropna() removed rather than counting windows nothing scored.
+        n_eff = self.independent_folds() * len(values) / len(frame)
+        usable = deviation and np.isfinite(deviation) and deviation > 1e-12
         return {
             "ic_fold_mean": mean,
             "ic_fold_std": deviation,
-            "ic_fold_t": float(t_stat),
+            "ic_fold_n_eff": float(n_eff),
+            "ic_fold_t": float(mean / deviation * np.sqrt(n_eff)) if usable else float("nan"),
+            "ic_fold_t_naive": (
+                float(mean / deviation * np.sqrt(len(values))) if usable else float("nan")
+            ),
             "ic_fold_positive_rate": float((values > 0).mean()),
         }
 
@@ -420,4 +536,5 @@ def run_walk_forward(
         feature_importance=mean_importance,
         feature_importance_std=std_importance,
         realised_volatility=volatility,
+        horizon=int(dataset.horizon),
     )

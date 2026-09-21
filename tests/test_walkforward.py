@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from ai_stock.config import WalkForwardConfig
+from ai_stock.config import FeatureConfig, WalkForwardConfig
 from ai_stock.evaluation.walkforward import (
     WalkForwardResult,
     WalkForwardSplitter,
     run_walk_forward,
 )
+from ai_stock.features.builder import build_dataset
 from ai_stock.models.base import Model
 
 
@@ -141,14 +144,99 @@ def test_fold_summary_statistics_are_consistent(dataset, walk_forward_config) ->
 
     assert len(frame) == len(result.folds)
     assert summary["ic_fold_mean"] == pytest.approx(frame["ic_pearson"].mean())
-    expected_t = frame["ic_pearson"].mean() / frame["ic_pearson"].std(ddof=1) * np.sqrt(len(frame))
-    assert summary["ic_fold_t"] == pytest.approx(expected_t)
+    ratio = frame["ic_pearson"].mean() / frame["ic_pearson"].std(ddof=1)
+    assert summary["ic_fold_t_naive"] == pytest.approx(ratio * np.sqrt(len(frame)))
+    assert summary["ic_fold_t"] == pytest.approx(ratio * np.sqrt(summary["ic_fold_n_eff"]))
     assert 0.0 <= summary["ic_fold_positive_rate"] <= 1.0
+
+
+def test_a_one_day_horizon_costs_the_fold_count_nothing(dataset, walk_forward_config) -> None:
+    """With ``horizon=1`` abutting test windows really are independent.
+
+    Pinned because the correction is as easy to over-apply as it is to
+    forget. Nothing is shared here - each bar's label is the next bar, which
+    is still inside the same window - so a count below the fold count would
+    be inventing redundancy, and that understates an edge exactly as
+    dishonestly as the raw count overstates one.
+    """
+    assert dataset.horizon == 1
+    result = run_walk_forward(dataset, "ridge", walk_forward_config)
+
+    assert result.independent_folds() == float(len(result.folds))
+    summary = result.fold_summary()
+    assert summary["ic_fold_t"] == pytest.approx(summary["ic_fold_t_naive"])
+
+
+def test_abutting_folds_share_the_horizon_length_label_tail(ohlcv, walk_forward_config) -> None:
+    """A 5-day target makes each window reach 4 bars into the next one."""
+    dataset = build_dataset(ohlcv, FeatureConfig(horizon=5))
+    result = run_walk_forward(dataset, "ridge", walk_forward_config)
+
+    n_folds = len(result.folds)
+    n_eff = result.independent_folds()
+    assert n_folds - 1 < n_eff < n_folds
+
+    # Hand-checkable: five folds of 100, 100, 100, 100 and 41 test bars, each
+    # reaching horizon - 1 = 4 bars further, so widths 104, 104, 104, 104, 45
+    # over a union spanning 445 bars. 445 / (461 / 5) = 4.8265.
+    assert [fold.n_test for fold in result.folds] == [100, 100, 100, 100, 41]
+    assert n_eff == pytest.approx(445 / (461 / 5))
+
+    summary = result.fold_summary()
+    assert abs(summary["ic_fold_t"]) < abs(summary["ic_fold_t_naive"])
+
+
+def test_overlapping_folds_do_not_count_as_independent_reads(dataset) -> None:
+    """A tiny step re-scores the same window; twenty folds are not twenty bets."""
+    config = WalkForwardConfig(train_size=300, test_size=100, step=5, min_train_size=100)
+    with pytest.warns(UserWarning, match="overlapping"):
+        result = run_walk_forward(dataset, "ridge", config)
+
+    n_eff = result.independent_folds()
+    assert len(result.folds) > 10
+    assert n_eff < len(result.folds) / 4
+    assert n_eff >= 1.0
+
+    summary = result.fold_summary()
+    assert abs(summary["ic_fold_t"]) < abs(summary["ic_fold_t_naive"])
+
+
+def test_independent_folds_never_exceeds_the_fold_count(dataset) -> None:
+    """Whatever the schedule, the correction can only ever shrink the sample."""
+    for step in (10, 50, 100, 200):
+        config = WalkForwardConfig(train_size=300, test_size=100, step=step, min_train_size=100)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            result = run_walk_forward(dataset, "ridge", config)
+        assert 1.0 <= result.independent_folds() <= len(result.folds)
+
+
+def test_independent_folds_of_a_result_without_folds_is_zero() -> None:
+    empty = pd.Series(dtype=float)
+    result = WalkForwardResult(
+        model_name="none",
+        is_classifier=False,
+        signal_units="return",
+        predictions=empty,
+        forward_return=empty,
+        direction=empty,
+        close=empty,
+    )
+    assert result.independent_folds() == 0.0
+    assert np.isnan(result.fold_summary()["ic_fold_n_eff"])
 
 
 def test_metrics_include_both_pooled_and_per_fold_views(dataset, walk_forward_config) -> None:
     metrics = run_walk_forward(dataset, "ridge", walk_forward_config).metrics()
-    for key in ("ic_pearson", "ic_fold_mean", "ic_fold_t", "n_folds", "roc_auc"):
+    for key in (
+        "ic_pearson",
+        "ic_fold_mean",
+        "ic_fold_n_eff",
+        "ic_fold_t",
+        "ic_fold_t_naive",
+        "n_folds",
+        "roc_auc",
+    ):
         assert key in metrics
 
 

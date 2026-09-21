@@ -519,9 +519,11 @@ def _command_backtest(args: argparse.Namespace) -> int:
             [
                 f"model            {run.name}",
                 f"out-of-sample    {len(run.walk_forward)} bars over "
-                f"{len(run.walk_forward.folds)} folds",
+                f"{len(run.walk_forward.folds)} folds "
+                f"({format_number(metrics['ic_fold_n_eff'])} independent)",
                 f"fold IC          {format_number(metrics['ic_fold_mean'])} "
-                f"(t = {format_number(metrics['ic_fold_t'])})",
+                f"(t = {format_number(metrics['ic_fold_t'])}, "
+                f"naive t = {format_number(metrics['ic_fold_t_naive'])})",
                 f"Sharpe           {format_number(trading['sharpe'])} "
                 f"vs buy & hold {format_number(run.backtest.benchmark_metrics['sharpe'])}",
                 f"annual return    {format_number(trading['annualised_return'], percent=True)}",
