@@ -12,6 +12,7 @@ import pandas as pd
 from ai_stock.config import ExperimentConfig
 from ai_stock.journal import ScoreResult
 from ai_stock.pipeline import ModelRun, ScreenResult, SimulationBundle, deflated_sharpe_ratios
+from ai_stock.portfolio import PortfolioResult
 from ai_stock.reporting.report import (
     Report,
     ascii_bars,
@@ -484,6 +485,57 @@ def _sleeve_vs_asset_verdict(metrics: dict[str, float]) -> str:
     )
 
 
+def _stress_verdict(metrics: dict[str, float], portfolio: PortfolioResult) -> str:
+    """Say whether the bet count held up in the drawdown, or collapsed into it.
+
+    The full-sample count above is an average over every regime the sleeves
+    lived through. This is the only line in the section that asks what was
+    available on the days it mattered, which is not the average day.
+    """
+    window = int(metrics["rolling_bets_window"])
+    stressed = metrics["rolling_bets_stressed"]
+    calm = metrics["rolling_bets_calm"]
+    gap = metrics["rolling_bets_stress_gap"]
+    if not np.isfinite(gap):
+        return (
+            f"There are too few dates - or too little drawdown - to recompute the bet count "
+            f"on a rolling {window}-day window and split it by drawdown, so whether this "
+            "diversification survives a sell-off is untested here."
+        )
+
+    worst = portfolio.rolling_effective_bets(window)
+    trough = worst.idxmin()
+    when = trough.date() if hasattr(trough, "date") else trough
+    preamble = (
+        f"Recomputed on a trailing {window}-day window, the bet count fell as low as "
+        f"**{format_number(metrics['rolling_bets_min'], digits=2)}** (window ending {when}), "
+        f"against a median of {format_number(metrics['rolling_bets_median'], digits=2)}. "
+        f"On the deepest fifth of the drawdown it averaged "
+        f"{format_number(stressed, digits=2)} bet(s), against "
+        f"{format_number(calm, digits=2)} on every other day. "
+    )
+    if gap <= -0.25:
+        return preamble + (
+            "**The diversification thinned in exactly the periods it was supposed to "
+            "cushion.** That is the ordinary behaviour of correlated names in a sell-off, and "
+            "it is the reason the full-sample count above reads high: it averages the "
+            "diversification available on a calm day into the number you would quote for a "
+            "bad one. Size the portfolio off the stressed figure, not the headline."
+        )
+    if gap >= 0.25:
+        return preamble + (
+            "The sleeves held apart through the drawdown, so the full-sample count is not "
+            "flattering the bad days here. Treat that as one sample's behaviour rather than a "
+            "property: the stressed dates are a handful of episodes, and correlations that "
+            "stayed put through these ones can still converge in the next."
+        )
+    return preamble + (
+        "The bet count was about the same in the drawdown as outside it, so the full-sample "
+        "figure is not hiding a collapse over this sample. It is a description of these "
+        "episodes, not a guarantee about the next one."
+    )
+
+
 def _portfolio_section(report: Report, result: ScreenResult) -> None:
     """Append what the ranking cannot say: how many bets these symbols really are.
 
@@ -538,6 +590,18 @@ def _portfolio_section(report: Report, result: ScreenResult) -> None:
                     "effective bets from holding the shares instead",
                     format_number(metrics["asset_effective_bets"]),
                 ],
+                [
+                    f"effective bets, worst {int(metrics['rolling_bets_window'])}-day window",
+                    format_number(metrics["rolling_bets_min"]),
+                ],
+                [
+                    "effective bets in the deepest fifth of the drawdown",
+                    format_number(metrics["rolling_bets_stressed"]),
+                ],
+                [
+                    "effective bets on every other day",
+                    format_number(metrics["rolling_bets_calm"]),
+                ],
                 ["portfolio Sharpe", format_number(metrics["sharpe"])],
                 [
                     "Sharpe if the sleeves were independent",
@@ -547,6 +611,8 @@ def _portfolio_section(report: Report, result: ScreenResult) -> None:
             ],
         )
     )
+
+    report.text(_stress_verdict(metrics, portfolio))
 
     report.heading("Weights, and where the risk actually sits", level=3)
     report.dataframe(portfolio.sleeve_table())
@@ -567,6 +633,14 @@ def _portfolio_section(report: Report, result: ScreenResult) -> None:
             "weights and only removes the correlation. The distance between it and the "
             "portfolio Sharpe is the diversification a four-backtest sum would have claimed "
             "and this universe does not provide.",
+            "The rolling bet count holds the weights fixed and lets only the correlation "
+            "move, so the drawdown split measures what the correlation did rather than what "
+            "a reweighting would have done. Its windows overlap by "
+            f"{int(metrics['rolling_bets_window']) - 1} days and a drawdown is a run of "
+            "consecutive days, so the "
+            f"{int(metrics['rolling_bets_n_stressed']):,} stressed dates are far fewer "
+            "independent episodes than they look. No significance is claimed for the gap, and "
+            "none should be read into it.",
             "`risk_contribution` is each sleeve's share of portfolio variance. Equal capital "
             "is not equal risk: read it against `weight` before concluding the allocation is "
             "balanced.",

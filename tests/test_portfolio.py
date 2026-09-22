@@ -319,3 +319,115 @@ def test_asset_returns_must_cover_every_date_the_sleeves_trade() -> None:
 def test_build_portfolio_rejects_an_unknown_scheme() -> None:
     with pytest.raises(ValueError, match="unknown weight scheme"):
         build_portfolio(_sleeves(2), scheme="mean_variance")
+
+
+# --------------------------------------------------------------------------- #
+# rolling_effective_bets / diversification_under_stress
+# --------------------------------------------------------------------------- #
+def _regime_sleeves(*, n_days: int = 500, switch: int = 250, seed: int = 0) -> dict[str, pd.Series]:
+    """Two sleeves that are independent, then converge and fall together.
+
+    The planted structure the whole feature exists to find: diversification
+    that is real on a calm day and gone on a bad one. The full-sample count
+    averages the two regimes and reports neither.
+    """
+    rng = np.random.default_rng(seed)
+    index = pd.bdate_range("2020-01-01", periods=n_days, name="date")
+    calm = rng.normal(0.0, 0.01, (n_days, 2))
+    shared = rng.normal(0.0, 0.01, n_days) - 0.004
+    stressed = np.column_stack([shared, shared])
+    values = np.where((np.arange(n_days) < switch)[:, None], calm, stressed)
+    return {name: pd.Series(values[:, i], index=index) for i, name in enumerate(("A", "B"))}
+
+
+def test_rolling_effective_bets_is_the_full_sample_count_on_a_full_sample_window() -> None:
+    """The rolling measure must reduce to the one it generalises, or it measures something else."""
+    portfolio = build_portfolio(_sleeves(4, n_days=200, correlation=0.5, seed=3))
+    rolling = portfolio.rolling_effective_bets(window=len(portfolio.sleeves))
+
+    assert rolling.iloc[-1] == pytest.approx(portfolio.metrics()["effective_bets"])
+    assert rolling.iloc[:-1].isna().all()
+
+
+def test_rolling_effective_bets_leaves_the_first_window_unscored() -> None:
+    portfolio = build_portfolio(_sleeves(3, n_days=120, seed=4))
+    rolling = portfolio.rolling_effective_bets(window=63)
+
+    assert rolling.index.equals(portfolio.sleeves.index)
+    assert rolling.iloc[:62].isna().all()
+    assert rolling.iloc[62:].notna().all()
+
+
+def test_a_window_longer_than_the_sample_scores_nothing_rather_than_guessing() -> None:
+    portfolio = build_portfolio(_sleeves(2, n_days=40, seed=6))
+    assert portfolio.rolling_effective_bets(window=63).isna().all()
+    assert not np.isfinite(portfolio.diversification_under_stress()["rolling_bets_stress_gap"])
+
+
+def test_the_stress_split_finds_diversification_that_vanishes_in_the_drawdown() -> None:
+    """The headline number must sit between the two regimes and describe neither."""
+    metrics = build_portfolio(_regime_sleeves(seed=9)).metrics()
+
+    assert metrics["rolling_bets_stressed"] == pytest.approx(1.0, abs=0.05)
+    assert metrics["rolling_bets_calm"] > metrics["rolling_bets_stressed"] + 0.25
+    assert metrics["rolling_bets_stress_gap"] == pytest.approx(
+        metrics["rolling_bets_stressed"] - metrics["rolling_bets_calm"]
+    )
+    # The failure this feature exists to expose: one full-sample number that is
+    # too low for the calm regime and too high for the one that mattered.
+    assert metrics["rolling_bets_stressed"] < metrics["effective_bets"]
+    assert metrics["effective_bets"] < metrics["rolling_bets_calm"]
+
+
+def test_stable_correlation_leaves_no_stress_gap() -> None:
+    """A constant-correlation sample must not manufacture a collapse out of noise."""
+    metrics = build_portfolio(_sleeves(4, n_days=750, correlation=0.5, seed=13)).metrics()
+
+    assert metrics["rolling_bets_stress_gap"] == pytest.approx(0.0, abs=0.25)
+    assert metrics["rolling_bets_min"] <= metrics["effective_bets"]
+
+
+def test_the_rolling_minimum_never_flatters_the_full_sample_count() -> None:
+    """A trough that sits above the average would mean the window is not being re-estimated."""
+    metrics = build_portfolio(_regime_sleeves(seed=17)).metrics()
+    assert metrics["rolling_bets_min"] <= metrics["rolling_bets_median"]
+    assert metrics["rolling_bets_min"] <= metrics["effective_bets"]
+
+
+def test_the_stress_quantile_sizes_the_stressed_set() -> None:
+    portfolio = build_portfolio(_regime_sleeves(seed=21))
+    scored = int(portfolio.rolling_effective_bets().notna().sum())
+
+    narrow = portfolio.diversification_under_stress(quantile=0.1)["rolling_bets_n_stressed"]
+    wide = portfolio.diversification_under_stress(quantile=0.4)["rolling_bets_n_stressed"]
+
+    assert narrow < wide
+    assert narrow == pytest.approx(0.1 * scored, abs=2)
+    assert wide == pytest.approx(0.4 * scored, abs=2)
+
+
+def test_a_portfolio_that_never_lost_has_no_stressed_days_to_compare() -> None:
+    """All-ties at zero drawdown leaves nothing calm: NaN, not a gap of zero."""
+    index = pd.bdate_range("2024-01-01", periods=120, name="date")
+    rng = np.random.default_rng(29)
+    sleeves = {
+        name: pd.Series(np.abs(rng.normal(0.002, 0.001, 120)), index=index) for name in ("A", "B")
+    }
+    metrics = build_portfolio(sleeves).metrics()
+
+    assert (build_portfolio(sleeves).drawdown().abs() < 1e-12).all()
+    assert not np.isfinite(metrics["rolling_bets_stress_gap"])
+    assert np.isfinite(metrics["rolling_bets_min"])
+
+
+def test_rolling_effective_bets_rejects_a_window_too_short_for_a_covariance() -> None:
+    portfolio = build_portfolio(_sleeves(2, n_days=100, seed=31))
+    with pytest.raises(ValueError, match="at least two periods"):
+        portfolio.rolling_effective_bets(window=1)
+
+
+@pytest.mark.parametrize("quantile", [0.0, 1.0, -0.1, 1.5])
+def test_the_stress_quantile_must_be_a_strict_fraction(quantile: float) -> None:
+    portfolio = build_portfolio(_sleeves(2, n_days=100, seed=33))
+    with pytest.raises(ValueError, match="strictly between 0 and 1"):
+        portfolio.diversification_under_stress(quantile=quantile)
