@@ -61,8 +61,10 @@ make check    # lint + test + doctest + smoke，約 40 秒
 ```
 
 這一條跑的是 `.github/workflows/ci.yml` 的完整內容、同樣順序。**CI 目前因為
-Actions 額度用盡而無法執行**，所以在額度恢復之前，這是一個修改與 `main`
-之間唯一的關卡——請在 push 前跑過，並把結果寫進 PR。
+Actions 額度用盡而無法執行**（最後一次綠燈 2026-09-13），所以在額度恢復之前，
+這是一個修改與 `main` 之間唯一的關卡——請在 push 前跑過，並把結果寫進 PR。
+同一個額度問題也讓每日行情 workflow 停擺，日誌自 2026-09-11 起沒有新資料；
+狀態與代價記在 [roadmap 的 Blocked 一節](docs/roadmap.md)。
 
 | 關卡 | 內容 |
 |---|---|
@@ -125,6 +127,50 @@ portfolio       Sharpe 0.8030 vs 0.8566 if the sleeves were independent
 判讀順序：**先看 `excess_sharpe`**（負的就不用往下看了，你贏不過買進持有），
 **再看 `q_value`**（不是 `p_value`），最後才是 IC 與準確率。
 
+> 上面那張表是**合成**族群，用來示範輸出格式與「有存活者」時的樣子。
+> 真實族群的答案在下一節，而且不一樣。
+
+### 真實族群上的答案：沒有
+
+同一條指令，換成 `config/universe.txt` 裡四檔真實的記憶體股，
+各 3,664 根日線（2011 起至 2026-09-11），`random_forest`、`horizon=5`、
+成本 2 bps + 滑價 3 bps、200 次 rotation 排列：
+
+```
+| metric               | 2408.TW  | 2337.TW | MU      | 2344.TW |
+|----------------------|----------|---------|---------|---------|
+| ic_fold_mean         | -0.0390  | 0.0739  | 0.0462  | -0.0320 |
+| ic_fold_t            | -1.0102  | 2.0598  | 1.4919  | -1.0918 |
+| directional_accuracy | 50.79%   | 52.80%  | 51.91%  | 47.04%  |
+| sharpe               | 0.4446   | 0.3040  | 0.3694  | -0.0690 |
+| benchmark_sharpe     | 0.7376   | 0.6850  | 0.8166  | 0.8538  |
+| excess_sharpe        | -0.2930  | -0.3810 | -0.4473 | -0.9228 |
+| annual_turnover      | 104.6344 | 64.3830 | 71.5262 | 90.3236 |
+| p_value              | 0.1343   | 0.1194  | 0.4378  | 0.8010  |
+| q_value              | 0.2687   | 0.2687  | 0.5837  | 0.8010  |
+
+held together   4 sleeves, equally weighted, correlated 0.08 -> 3.21 effective bet(s)
+the shares      correlated 0.36 -> 1.94 if you just held them
+portfolio       Sharpe 0.4168 vs 0.4645 if the sleeves were independent
+
+4 symbol(s) tested · noise alone would flag 0.2000 · no symbol both beat buy & hold and survived q <= 0.05
+```
+
+**四檔的 `excess_sharpe` 全是負的**，照判讀順序第一步就該停下來：四檔都有正的
+Sharpe（除了 2344.TW），但四檔都輸給買進持有。依照判讀順序，後面的 `q` 值
+其實不必看了——看了也沒有一檔低於 0.05。
+
+這一節存在的理由，不是因為結果好看，而是因為它是本專案唯一有意義的**整體驗證**：
+同一條管線，在植入邊際的合成市場上還原出 Sharpe 0.56 / p = 0.020，
+在效率市場上交出 −0.05 / p = 0.478，在真實的四檔記憶體股上交出「沒有」。
+一個在真實日線上找得到邊際的框架，比較可能是壞掉了，而不是聰明。
+
+兩個不該過度解讀的地方。`2337.TW` 的 `ic_fold_t` = 2.06 看起來像個訊號，但它的
+`excess_sharpe` 是 −0.38：**預測方向的能力，和扣掉成本後贏過買進持有，是兩件事**，
+中間隔著 64 倍的年換手率。另外，腿與腿的相關 0.08 遠低於股票本身的 0.36，
+有效賭注數因此是 3.21——但在沒有任何一腿證明有邊際的前提下，這只是四個互相亂猜的
+模型剛好站在不同邊，不是分散。
+
 ### 四檔一起做，等於幾個賭注？
 
 排名表的每一列都假設「只做這一檔」。一起持有是另一個問題，報告的
@@ -132,8 +178,8 @@ portfolio       Sharpe 0.8030 vs 0.8566 if the sleeves were independent
 （$\mathrm{DR}^2$，等權等波動下即 $n/(1+(n-1)\rho)$）、各腿的風險貢獻，
 以及「如果四腿彼此獨立，Sharpe 會是多少」。
 
-值得注意的是**策略腿之間的相關（0.05）遠低於股票本身（0.36）**。
-這不自動是好消息：腿與腿會因為模型剛好站在不同邊而去相關，而**互相亂猜的模型
+兩張表都出現同一件事：**策略腿之間的相關（合成 0.05、真實 0.08）遠低於股票本身
+的 0.36**。這不自動是好消息：腿與腿會因為模型剛好站在不同邊而去相關，而**互相亂猜的模型
 看起來就長這樣**。要先確認每一腿真的有邊際（看 `vs B&H` 與 `q`），
 去相關才算得上分散。詳見 [方法論 8 節](docs/methodology.md)。
 
@@ -167,16 +213,25 @@ ai-stock journal --data data/prices --journal data/journal/forecasts.csv --out r
 2. 掃描日誌，只有「`asof_date + horizon` 那根 bar 已經存在」的列才計分；
 3. 比對 live 命中率與回測宣稱值，並用 **z 值**（差距 ÷ 自身標準誤）說明兩者是否一致。
 
+這是本 repo 的日誌**實際**在 2026-09-22 跑出來的樣子，不是示意：
+
 ```
-data as of         2026-09-11
-scored / pending   108 / 12
-live hit rate      56.48%
-live IC            0.1824
-vs backtest        claim 50.55% -> live 56.48%  (z = 1.2337)
+data as of         2026-09-11  (STALE: 2337.TW, 2344.TW, 2408.TW, MU - check the downloader)
+scored / pending   15 / 16
+live hit rate      80.00%
+live IC            0.6639
+total P&L          45.44%
+vs backtest        claim 50.64% -> live 80.00%  (z = 0.5873 over 1 independent horizon(s); naive z = 2.2747)
 ```
 
 判讀：**先看 `n_scored`**。少於 30 筆時 z 值不管發生什麼都接近 0，報告會直接說
 「太少，什麼都不能講」。z ≤ −2 才是衰減訊號——回測承諾了 live 交不出來的東西。
+
+上面這份輸出正好示範了為什麼要先看 `n_scored`：80% 的命中率、0.66 的 IC、45% 的
+P&L，三個數字都很漂亮，而它們全部來自 **1 個獨立期距**。naive z = 2.27 會說
+「顯著」，把重疊的期距與相關的標的各算一次；改用不重疊區塊之後是 0.59，也就是
+**什麼都還沒證明**。兩者之間的差距不會隨時間自己消失，只會隨著新的交易日一天一天
+被填上——這正是 `data as of` 停在 2026-09-11 的代價，見 [roadmap 的 Blocked 一節](docs/roadmap.md)。
 
 > **再看 `data as of`。** 行情源停掉時，這份報告不會變安靜，它會有自信地重複：
 > 同一批預測對同一批 bar 到期，命中率一字不差地再報一次。任何標的落後超過

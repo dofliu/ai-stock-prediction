@@ -1,44 +1,40 @@
 # Roadmap
 
-The daily routine reads this file to decide what to work on, and edits it when
-something is finished or a new gap appears. Items are ordered by how much they
-change what the project can honestly claim - not by how interesting they are to
-build.
+An automated session reads this file to decide what to work on, and edits it
+when something is finished or a new gap appears. Items are ordered by how much
+they change what the project can honestly claim - not by how interesting they
+are to build.
 
 Keep each item small enough to land in one reviewed pull request.
 
+**How a session picks work.** In order, stopping at the first that applies:
+
+1. An open pull request that is not mergeable - red gate, merge conflict, or an
+   unanswered review comment. Drive it to mergeable before starting anything
+   new. Two sessions opening two pull requests for the same item is the waste
+   this rule exists to prevent.
+2. The first unchecked item under **Now**.
+3. If **Now** is empty, promote the top item of **Next**, or of **Later** if
+   **Next** is empty, and do that.
+
+**Blocked** is not a work list. Nothing in it can be fixed by writing code
+here, so nothing in it is ever picked; it is there so the cost stays on the
+record rather than in someone's memory.
+
+`make check` is the gate, and while Actions cannot run it is the only thing
+standing between a change and `main`. Push nothing that has not passed it, and
+say so in the pull request.
+
 ## Now
-
-- [ ] **Restore GitHub Actions minutes. Not a code item - nobody here can fix
-  it by writing anything.** This repository is private, so Actions minutes are
-  metered, and the included quota is spent. The signature is unmistakable once
-  you know it: *every* workflow - `ci.yml` as much as `daily-prices.yml`, on
-  push, `pull_request` and `schedule` alike - fails after three to five
-  seconds with `runner_id: 0` and no downloadable logs, because no runner was
-  ever assigned. No step ran, so no step can be debugged. Last green run of
-  anything: 2026-09-13.
-
-  Three ways out, all of them the repository owner's to take: raise the
-  spending limit under <https://github.com/settings/billing>, make the
-  repository public (standard runners are unmetered for public repositories),
-  or wait for the monthly reset. Until one of them happens, `make check` is
-  the gate (see below) and `scripts/daily_update.py` is the feed.
-
-  What it is costing, so that the cost is on the record rather than in
-  someone's memory: the journal has been frozen since 2026-09-11 at 15 matured
-  forecasts covering **one** independent horizon. Independent horizons arrive
-  one trading day at a time and cannot be backfilled, because a forecast
-  written today about a day that has already happened is not a forecast. Every
-  day the feed stays down is a day the only untunable number here does not
-  earn.
-
-## Next
 
 - [ ] **Rolling correlation in the portfolio section.** `effective_bets` is a
   full-sample average, and correlations rise in exactly the drawdowns the
   diversification was supposed to cushion. A rolling window would show whether
   the bet count collapses when it matters, the same way `hit_rate_z` over the
-  journal's timeline shows *when* a decay started.
+  journal's timeline shows *when* a decay started. Section 8 of
+  `docs/methodology.md` already ends by admitting this ("報表上的有效賭注數是
+  全樣本平均值，不是承諾"), so the doc change is to replace an admission with a
+  number.
 - [ ] **Time-zone-aware alignment for cross-market correlation.** Matching a
   Taipei bar to a New York bar by calendar date understates their correlation:
   part of a shared move lands on the next date for one of them. Lagging one
@@ -46,6 +42,17 @@ Keep each item small enough to land in one reviewed pull request.
   visible in the current output - `MU` correlates 0.13-0.19 with the Taiwan
   names against 0.46-0.65 among themselves - so the effective bet count is
   currently flattered by an unknown amount.
+
+Both run entirely on the 3,664 bars already committed under `data/prices/`.
+Neither needs a network, a runner, or a fresh bar, which is why they are here
+while the feed is down.
+
+## Next
+
+Empty on purpose. Both items that were here moved up when the Actions blocker
+moved out of **Now**, and the queue behind them is **Later**. An item added
+here needs a reason it outranks what is already in **Later**; without one, a
+roadmap becomes a wish list.
 
 ## Later
 
@@ -56,7 +63,79 @@ Keep each item small enough to land in one reviewed pull request.
   and were chosen while looking at the data; selecting them inside each fold
   would remove one layer of selection bias.
 
+## Blocked
+
+Not a work list. Nothing here can be fixed by writing code in this repository,
+so a session never picks from it. It is here so the cost stays on the record.
+
+- [ ] **GitHub Actions minutes are exhausted.** This repository is private, so
+  Actions minutes are metered and the included quota is spent. The signature is
+  unmistakable once you know it: *every* workflow - `ci.yml` as much as
+  `daily-prices.yml`, on push, `pull_request` and `schedule` alike - fails
+  after three to five seconds with `runner_id: 0` and no downloadable logs,
+  because no runner was ever assigned. No step ran, so no step can be debugged.
+  Last green run of anything: 2026-09-13. The scheduled feed has failed every
+  weekday since, most recently run 24 on 2026-09-22.
+
+  Three ways out, all of them the repository owner's to take: raise the
+  spending limit under <https://github.com/settings/billing>, make the
+  repository public (standard runners are unmetered for public repositories),
+  or wait for the monthly reset.
+
+  **A cloud session is not a substitute for the runner, and this is the part
+  worth recording so nobody spends another hour rediscovering it.** Claude
+  Code's remote environment reaches PyPI and GitHub but not the price feed: a
+  CONNECT to `query1.finance.yahoo.com:443` is refused by the environment's
+  network policy with `403 Forbidden`, before any request is sent, so no
+  retry, user-agent, or alternative client changes the outcome. `make check`
+  runs there cleanly in about 40 seconds (456 tests, 17 doctests, smoke), so
+  *code* work is unblocked; `scripts/daily_update.py` is not. Until that host
+  is allowed by the environment's policy, the only machine that can run the
+  daily loop is one the owner controls.
+
+  What it is costing, measured rather than asserted: the journal has been
+  frozen since 2026-09-11 - eleven calendar days and seven trading days - at
+  31 recorded forecasts of which 15 have matured, covering **one** independent
+  horizon. Scored on 2026-09-22 it still reads a live hit rate of 80.00%
+  against the backtest's 50.64% claim, z = 0.5873 over that one horizon beside
+  a naive z of 2.2747. The distance between those two z values is the entire
+  reason the feed has to keep running: the naive one looks like a finding, and
+  there is not yet enough independent market underneath it to say. Independent
+  horizons arrive one trading day at a time and cannot be backfilled, because a
+  forecast written today about a day that has already happened is not a
+  forecast.
+
 ## Done
+
+- [x] Record what the framework actually finds on the real universe, and make
+  the roadmap safe for an automated session to read. Two separate defects in
+  the documentation, both of the same kind - a number that looks like a result
+  from this repository and is not.
+
+  **The README's screen example was synthetic and unlabelled**, showing a
+  survivor at `q = 0.0399`, directly above a paragraph about `config/
+  universe.txt`. The real four-symbol run is now beside it: every
+  `excess_sharpe` negative, nothing surviving `q <= 0.05`, `2337.TW` reaching
+  `ic_fold_t = 2.06` and still losing to buy & hold by 0.38 of a Sharpe across
+  64x annual turnover. That null is the project's only end-to-end validation
+  that means anything - planted edge recovered, efficient market refused, real
+  daily bars returning nothing - and it was the one result not written down.
+
+  **The journal example showed `108 / 12` scored against a real `15 / 16`**,
+  under a real `data as of 2026-09-11`. Replaced with the actual output, which
+  makes the point the prose was making anyway: 80% hit rate, 0.66 IC and 45%
+  P&L, all from one independent horizon, naive z 2.27 against an honest 0.59.
+
+  The roadmap itself had the structural version of the same problem. **Its
+  only `Now` item was one no session can do** - restoring Actions minutes is
+  the owner's to fix - so every firing read `Now`, found nothing actionable,
+  and chose for itself. The blocker moved to a new `Blocked` section that is
+  explicitly never picked from, the two unblocked items moved up, and the
+  preamble now states the pick order, including "drive an open pull request to
+  mergeable before opening another". Also recorded there, because it costs an
+  hour to rediscover: Claude Code's cloud environment cannot stand in for the
+  runner either - `query1.finance.yahoo.com:443` is refused at CONNECT by the
+  environment's network policy, while `make check` runs there in 40 seconds.
 
 - [x] Fail the daily workflow on a stale feed. `ai-stock journal
   --fail-if-stale [DAYS]` exits 3 when no symbol has a bar newer than DAYS,
