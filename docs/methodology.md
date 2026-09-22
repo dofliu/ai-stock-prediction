@@ -114,10 +114,44 @@ $$
 
 - `ic_pearson`：pooled（保留但不作為判準）
 - `ic_fold_mean`、`ic_fold_std`
-- `ic_fold_t` $= \dfrac{\overline{\mathrm{IC}}}{s_{\mathrm{IC}}}\sqrt{n_{\text{folds}}}$
+- `ic_fold_n_eff`、`ic_fold_t` $= \dfrac{\overline{\mathrm{IC}}}{s_{\mathrm{IC}}}\sqrt{n_{\text{eff}}}$
+- `ic_fold_t_naive` $= \dfrac{\overline{\mathrm{IC}}}{s_{\mathrm{IC}}}\sqrt{n_{\text{folds}}}$（舊值，保留作對照）
 - `ic_fold_positive_rate`
 
-判讀以逐 fold 指標為準，慣例門檻約 $|t| > 2$。
+判讀以逐 fold 指標為準，慣例門檻約 $|t| > 2$。分母的 $n_{\text{eff}}$ 見下一節。
+
+### `ic_fold_t` 該除以幾：`independent_folds()`
+
+`WalkForwardResult.independent_folds()`
+
+分母若用 fold 數，等於宣稱「每個 fold 都是一次獨立的市場觀測」。排程本身有兩個地方
+不成立，而且兩者都只由**排程**決定，與報酬無關：
+
+1. **測試視窗重疊。** `step` 預設等於 `test_size`，此時視窗恰好首尾相接；一旦把
+   `step` 調小，視窗就真的重疊——`step=1` 時二十個 fold 幾乎在評分同一段行情，是
+   一次觀測被報告了二十遍。`run_walk_forward()` 早就針對 pooled 樣本數發出警告，
+   但逐 fold 的 t 統計量有同樣的問題，而它先前沒說。
+2. **標籤尾巴。** $h$ 日目標讓測試視窗最後一根 bar 的結果落在 $h$ 根之後，也就是
+   落進下一個 fold 的視窗裡。即使首尾相接的 fold，也共用 $h-1$ 根結果 bar——這正是
+   限制 4 的重疊訊號問題，只是發生在 fold 邊界而非每一根 bar。
+
+每個 fold 貢獻半開區間 $[\text{test\_start},\ \text{test\_end} + h)$，
+$n_{\text{eff}}$ 取這些區間**聯集的長度**除以**平均寬度**：這些 fold 之間究竟走過了
+幾個 fold 寬度的不同行情。這是 7c 節 `independent_blocks()` 在「視窗比記錄間隔寬」
+情況下的推廣——那裡每天記一列、每列覆蓋 $h$ 天，得 $n/h$ 個區塊；這裡每 `step` 根
+出一個 fold、每個 fold 覆蓋 `width` 根，得 $n \cdot \text{step} / \text{width}$ 個。
+
+界限由構造保證：聯集不可能大於各區間寬度之和，所以 $n_{\text{eff}} \le n_{\text{folds}}$；
+聯集至少和最寬的區間一樣寬，所以 $n_{\text{eff}} \ge 1$。
+
+**預設排程下這個修正很小，而且本來就該很小。** `horizon=1` 時首尾相接的 fold 真的
+互相獨立，$n_{\text{eff}}$ 恰等於 fold 數——沒有冗餘就不該憑空捏造冗餘，低估邊際和
+高估邊際一樣不誠實。$h=5$、`test_size=100` 的五個 fold 則是 4.83 而非 5，t 從 2.53
+降到 2.49。真正咬人的是 `step` 被調小的時候。
+
+一個明說的保守偏誤：fold 位置取自 pooled 預測日曆，其中不含測試視窗之間的空隙，
+所以 `step > test_size` 時彼此分得很開的 fold 會被讀成僅僅相鄰。方向與 7c 節一致——
+寧可低估。
 
 ### Regime-conditional 評估
 
@@ -279,8 +313,8 @@ $\sqrt{p(1-p)/n}$ 裡的 $n$，要算成幾？
 數百次獨立下注：
 
 1. **視窗重疊。** $h = 5$ 時，今天的預測與昨天的預測共用五天結果中的四天。連續
-   十天的預測不是十次獨立的市場押注，而是兩次押注被觀測了五遍（見第 8 節限制 4，
-   `ic_fold_t` 有同樣的毛病）。
+   十天的預測不是十次獨立的市場押注，而是兩次押注被觀測了五遍（見第 8 節限制 4；
+   `ic_fold_t` 曾有同樣的毛病，現已依第 4 節〈`ic_fold_t` 該除以幾〉改用 `independent_folds()`）。
 2. **橫斷面相關。** 同一天記錄的各檔標的會一起動。`config/universe.txt` 是四檔
    記憶體類股，實質上是同一個景氣循環的四種看法，不是四個獨立訊息。
 
@@ -412,8 +446,11 @@ $\mathrm{RC}_i = w_i (\Sigma w)_i / (w^\top \Sigma w)$ 一併報出，
    但權重全樣本固定、腿間再平衡不計成本、也沒有資金上限或部位上限；
    訊號本身仍是逐檔獨立產生的，沒有任何跨標的的建模。
 4. **重疊訊號**：$h > 1$ 時每天以最新預測更新部位，屬慣例作法，但會使有效樣本數
-   小於 bar 數；`ic_fold_t` 的自由度因此偏樂觀。預測日誌的 `hit_rate_z` 已依
-   7c 節改用不重疊區塊計數，`ic_fold_t` 尚未比照辦理。
+   小於 bar 數。兩個吃到這個問題的顯著性數字都已改掉分母：預測日誌的 `hit_rate_z`
+   依 7c 節改用不重疊區塊，`ic_fold_t` 依第 4 節〈`ic_fold_t` 該除以幾〉改用 `independent_folds()`。剩下的
+   限制是**其餘指標沒改**——`ic_pearson`、`directional_accuracy`、`sharpe` 等仍以
+   bar 為單位計數，它們的隱含精度依舊偏樂觀；這些指標本身不附帶顯著性宣稱，所以
+   優先序較低，但讀的時候要知道。
 5. **合成 ≠ 真實**：能還原植入的邊際只證明管線正確，不代表真實市場存在該邊際。
 6. **FDR 與 deflated Sharpe 都只涵蓋單次跑法**：`screen` 的 `q` 值涵蓋跨標的的選擇，
    `compare` 的 `deflated_sharpe` 涵蓋跨模型的選擇，但兩者都只看得到當次那一輪。

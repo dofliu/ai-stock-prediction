@@ -34,10 +34,6 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Next
 
-- [ ] **Effective sample size for `ic_fold_t`.** The journal's `hit_rate_z` now
-  divides by non-overlapping horizon blocks rather than by row count, but
-  `ic_fold_t` still carries the optimistic degrees of freedom that limitation 4
-  in `docs/methodology.md` describes. The same block logic applies.
 - [ ] **Rolling correlation in the portfolio section.** `effective_bets` is a
   full-sample average, and correlations rise in exactly the drawdowns the
   diversification was supposed to cushion. A rolling window would show whether
@@ -75,6 +71,30 @@ Keep each item small enough to land in one reviewed pull request.
   and "the data underneath it stopped moving" need opposite responses. Note
   what it does *not* cover, which is the outage in progress: this fires from
   inside a job, and a quota failure means no job ever starts.
+- [x] Effective sample size for `ic_fold_t`
+  (`WalkForwardResult.independent_folds()`). The t-statistic across folds
+  divided by `sqrt(n_folds)`, which is the right sample size only when the
+  folds do not share market. Two things in the schedule make them share it:
+  `step` below `test_size` overlaps the test windows outright - a case
+  `run_walk_forward` already warned about for the *pooled* sample while the
+  t-statistic said nothing - and a `horizon`-day target makes even abutting
+  windows share `horizon - 1` bars of outcome. `ic_fold_n_eff` counts the
+  union of each fold's `[test_start, test_end + horizon)` span over their mean
+  width, `ic_fold_t` divides by that, and `ic_fold_t_naive` keeps the old
+  figure beside it, the same way `hit_rate_z_naive` sits beside `hit_rate_z`.
+
+  Two things worth recording, because the roadmap entry this closes got both
+  wrong. **The journal's block logic does not transfer directly** - applying
+  `independent_blocks()` to the pooled predictions would count ~250 blocks
+  against 10 folds and make the t-statistic *larger*. What generalises is the
+  ratio behind it, not the grouping. **And on the default schedule the
+  correction is small, which is the correct answer, not a disappointment.**
+  At `horizon=1` abutting folds are genuinely independent and `ic_fold_n_eff`
+  equals the fold count exactly; at `horizon=5` five folds read as 4.83 and t
+  moves 2.53 -> 2.49. Limitation 4 in `docs/methodology.md` claimed the
+  degrees of freedom were optimistic without saying through which channel, and
+  now names it. The honest residue is that every *other* bar-counted metric
+  still carries the optimistic precision, which limitation 4 now says.
 - [x] Core pipeline: synthetic market, causal features, walk-forward with
   embargo, cost-aware backtest, Monte Carlo, reports, CLI. (#1)
 - [x] Horizon-aware labelling of the simulate summary. (#2)

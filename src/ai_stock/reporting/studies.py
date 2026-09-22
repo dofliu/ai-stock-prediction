@@ -50,7 +50,9 @@ _SUMMARY_KEYS = (
     "ic_pearson",
     "ic_fold_mean",
     "ic_fold_std",
+    "ic_fold_n_eff",
     "ic_fold_t",
+    "ic_fold_t_naive",
     "ic_fold_positive_rate",
     "ic_spearman",
     "r2",
@@ -134,6 +136,9 @@ def _reading_notes() -> list[str]:
         "**fold IC** is the mean per-fold correlation between forecast and realised "
         "return; **IC t-stat** is its t-statistic across folds. Believe the per-fold "
         "numbers over the pooled `ic_pearson`, which mixes folds of different volatility.",
+        "**IC t-stat** is measured at `ic_fold_n_eff`, not at the fold count: folds "
+        "whose test windows overlap, or that abut and share a horizon-length label "
+        "tail, are not that many independent reads of the market.",
         "**dir. acc.** above 50% is necessary but nowhere near sufficient: being right "
         "51% of the time on small moves and wrong on large ones still loses money.",
         "**turnover** is annualised traded notional. Multiply it by the cost in bps to "
@@ -172,6 +177,21 @@ def render_backtest_report(run: ModelRun, config: ExperimentConfig) -> str:
     report.heading("Predictive performance")
     report.raw_table(
         metrics_table({run.name: walk_forward.metrics()}, keys=_SUMMARY_KEYS, label="metric")
+    )
+    report.bullets(
+        [
+            "`ic_fold_t` divides the mean fold IC by its dispersion and by the square root "
+            "of `ic_fold_n_eff` - the fold-widths of distinct market the schedule reaches, "
+            "not the number of folds. Test windows that overlap (`step` below `test_size`) "
+            "score the same market twice, and even abutting windows share the last "
+            "`horizon - 1` bars of outcome.",
+            "`ic_fold_t_naive` is the same statistic at the raw fold count, which is what "
+            "this report used to print. It assumes the folds are fully independent and "
+            "`ic_fold_t` assumes the shared span is worth nothing, so the honest figure "
+            "lies between them; while they disagree, believe the smaller.",
+            "Neither estimates a correlation. `ic_fold_n_eff` follows from the fold dates "
+            "and the horizon alone, so there is nothing in it to tune.",
+        ]
     )
 
     report.heading("Trading performance")
