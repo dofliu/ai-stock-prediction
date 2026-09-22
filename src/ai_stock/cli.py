@@ -680,6 +680,15 @@ def _command_screen(args: argparse.Namespace) -> int:
                 f"vs {format_number(portfolio['sharpe_if_independent'])} "
                 "if the sleeves were independent"
             )
+            if np.isfinite(portfolio["rolling_bets_stress_gap"]):
+                lines.append(
+                    f"when it mattered "
+                    f"{format_number(portfolio['rolling_bets_stressed'], digits=2)} "
+                    "effective bet(s) in the deepest fifth of the drawdown vs "
+                    f"{format_number(portfolio['rolling_bets_calm'], digits=2)} otherwise "
+                    f"(worst {int(portfolio['rolling_bets_window'])}-day window: "
+                    f"{format_number(portfolio['rolling_bets_min'], digits=2)})"
+                )
 
     survivors = result.survivors()
     lines.append(

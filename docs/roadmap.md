@@ -34,11 +34,6 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Next
 
-- [ ] **Rolling correlation in the portfolio section.** `effective_bets` is a
-  full-sample average, and correlations rise in exactly the drawdowns the
-  diversification was supposed to cushion. A rolling window would show whether
-  the bet count collapses when it matters, the same way `hit_rate_z` over the
-  journal's timeline shows *when* a decay started.
 - [ ] **Time-zone-aware alignment for cross-market correlation.** Matching a
   Taipei bar to a New York bar by calendar date understates their correlation:
   part of a shared move lands on the next date for one of them. Lagging one
@@ -58,6 +53,24 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Done
 
+- [x] Rolling correlation in the portfolio section
+  (`PortfolioResult.rolling_effective_bets`,
+  `PortfolioResult.diversification_under_stress`). `effective_bets` is a
+  full-sample average over every regime the sleeves lived through, which is
+  the diversification available on an average day rather than on a bad one.
+  The bet count is now recomputed on a trailing 63-day window at fixed
+  weights - only the correlation moves, so the split measures the correlation
+  and not a reweighting - and split by drawdown: the deepest fifth of dates
+  against all the others. A negative `rolling_bets_stress_gap` is the failure
+  the headline hides. On the four real symbols the gap is *positive* (4.00
+  stressed against 3.57 calm), so no collapse showed up here, but the worst
+  window reads 1.59 bets against a full-sample 3.21 - the headline was hiding
+  a thin quarter, just not the one in the drawdown. No significance is
+  claimed or computed: the windows overlap by 62 days and a drawdown is a run
+  of consecutive days, so the stressed dates are far fewer independent
+  episodes than they look. What is left undone is the direction of the
+  remaining bias - the time-zone item below still flatters every correlation
+  feeding this, rolling or not.
 - [x] Fail the daily workflow on a stale feed. `ai-stock journal
   --fail-if-stale [DAYS]` exits 3 when no symbol has a bar newer than DAYS,
   turning `data_freshness`'s observation into an alarm a scheduler can act on.

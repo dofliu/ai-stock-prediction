@@ -33,6 +33,8 @@ from ai_stock.config import TRADING_DAYS_PER_YEAR
 from ai_stock.evaluation.metrics import financial_metrics
 
 __all__ = [
+    "ROLLING_WINDOW",
+    "STRESS_QUANTILE",
     "WEIGHT_SCHEMES",
     "PortfolioResult",
     "align_sleeves",
@@ -46,6 +48,24 @@ _EPS = 1e-12
 
 WEIGHT_SCHEMES = ("equal", "inverse_vol")
 """Weighting rules `build_portfolio` accepts. Neither one reads a correlation."""
+
+ROLLING_WINDOW = 63
+"""Trailing window for `PortfolioResult.rolling_effective_bets`, in trading days.
+
+A quarter. Short enough that a correlation spike lasting a few weeks is still
+visible rather than averaged away, long enough that a 4x4 covariance estimated
+from it is not mostly noise - roughly sixteen observations per estimated
+pairwise correlation. Nothing about the choice is optimal; it is a compromise
+between two biases that point in opposite directions, and it is a parameter so
+that a reader who disagrees can move it.
+"""
+
+STRESS_QUANTILE = 0.2
+"""Fraction of dates counted as stressed: the deepest fifth of the drawdown.
+
+Deep enough to mean something, wide enough that the stressed set is not one
+episode. Both halves of that sentence are judgements, not results.
+"""
 
 
 def _combined(returns_by_symbol: Mapping[str, pd.Series]) -> pd.DataFrame:
@@ -231,6 +251,101 @@ class PortfolioResult:
         """Correlation of the underlying shares, for contrast with the sleeves."""
         return None if self.assets is None else self.assets.corr()
 
+    def drawdown(self) -> pd.Series:
+        """Depth below the running peak, as a non-positive fraction, on every date."""
+        peak = self.equity.cummax()
+        return (self.equity / peak.where(peak.abs() > _EPS) - 1.0).rename("drawdown")
+
+    def rolling_effective_bets(self, window: int = ROLLING_WINDOW) -> pd.Series:
+        """:func:`effective_number_of_bets` recomputed on each trailing ``window`` of dates.
+
+        :meth:`metrics`'s ``effective_bets`` is one number for the whole
+        sample, which is an average over every regime the sleeves lived
+        through. Correlations are not constant, and they do not move
+        randomly: they rise in exactly the sell-offs the diversification was
+        supposed to cushion. A full-sample count therefore reports the
+        diversification available on the average day, which is not the day
+        anyone needs it.
+
+        The weights are held fixed at :attr:`weights` rather than refitted
+        inside each window, on purpose: the question is what the
+        *correlation* did, and a weight that moves too makes the two
+        inseparable. For ``inverse_vol`` that means each window is scored at
+        weights derived from the full sample - descriptive, like the rest of
+        this section, and not a claim about what could have been traded.
+
+        The first ``window - 1`` dates are ``NaN``, and so is every date if
+        the sleeves share fewer than ``window`` of them.
+
+        Consecutive values share ``window - 1`` observations, so the series is
+        heavily autocorrelated. Read it as a picture of when diversification
+        was thin, never as a count of independent readings.
+        """
+        if window < 2:
+            raise ValueError(f"window must cover at least two periods; got {window}")
+        values = self.sleeves.to_numpy(dtype=float)
+        vector = self.weights.to_numpy(dtype=float)
+        counts = np.full(len(values), float("nan"))
+        for end in range(window, len(values) + 1):
+            block = np.atleast_2d(np.cov(values[end - window : end], rowvar=False, ddof=1))
+            counts[end - 1] = effective_number_of_bets(block, vector)
+        return pd.Series(counts, index=self.sleeves.index, name="rolling_effective_bets")
+
+    def diversification_under_stress(
+        self, window: int = ROLLING_WINDOW, *, quantile: float = STRESS_QUANTILE
+    ) -> dict[str, float]:
+        """Rolling bet count on the deepest-drawdown dates against all the others.
+
+        Splits :meth:`rolling_effective_bets` by :meth:`drawdown`: the
+        ``quantile`` fraction of dates sitting furthest below the equity
+        curve's running peak are the stressed ones, the rest are calm.
+        ``stress_gap`` is stressed minus calm, so a **negative** gap is the
+        failure the full-sample count hides - the sleeves converged into one
+        bet precisely while the portfolio was losing money.
+
+        This is a description of what happened over one sample, not a
+        prediction. The stressed dates are contiguous by construction - a
+        drawdown is a run of days, not a scatter - so a handful of episodes
+        can supply the whole stressed set, and their windows overlap besides.
+        There is deliberately no p-value here: there is nothing to attach one
+        to that would not overstate the sample.
+        """
+        if not 0.0 < quantile < 1.0:
+            raise ValueError(f"quantile must lie strictly between 0 and 1; got {quantile}")
+        counts = self.rolling_effective_bets(window)
+        drawdown = self.drawdown()
+        usable = counts.notna() & drawdown.notna()
+        empty = {
+            "rolling_bets_window": float(window),
+            "rolling_bets_min": float("nan"),
+            "rolling_bets_median": float("nan"),
+            "rolling_bets_stressed": float("nan"),
+            "rolling_bets_calm": float("nan"),
+            "rolling_bets_stress_gap": float("nan"),
+            "rolling_bets_n_stressed": 0.0,
+        }
+        if not bool(usable.any()):
+            return empty
+
+        counts, drawdown = counts[usable], drawdown[usable]
+        # `<=` against the quantile puts ties on the stressed side. A strategy
+        # that has never lost is all ties at zero, which leaves nothing calm to
+        # compare against - reported as NaN rather than as a gap of zero.
+        stressed = counts[drawdown <= drawdown.quantile(quantile)]
+        calm = counts[drawdown > drawdown.quantile(quantile)]
+        comparable = bool(len(stressed)) and bool(len(calm))
+        return {
+            **empty,
+            "rolling_bets_min": float(counts.min()),
+            "rolling_bets_median": float(counts.median()),
+            "rolling_bets_stressed": float(stressed.mean()) if len(stressed) else float("nan"),
+            "rolling_bets_calm": float(calm.mean()) if len(calm) else float("nan"),
+            "rolling_bets_stress_gap": float(stressed.mean() - calm.mean())
+            if comparable
+            else float("nan"),
+            "rolling_bets_n_stressed": float(len(stressed)),
+        }
+
     def risk_contributions(self) -> pd.Series:
         """Each sleeve's share of portfolio variance, summing to one.
 
@@ -321,6 +436,7 @@ class PortfolioResult:
                 "effective_bets": float(ratio**2),
                 "sharpe_if_independent": independent,
                 "sharpe_diversification_gap": float(independent - merged["sharpe"]),
+                **self.diversification_under_stress(),
             }
         )
         return merged
