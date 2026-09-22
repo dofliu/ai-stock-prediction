@@ -680,6 +680,13 @@ def _command_screen(args: argparse.Namespace) -> int:
                 f"vs {format_number(portfolio['sharpe_if_independent'])} "
                 "if the sleeves were independent"
             )
+            if np.isfinite(portfolio.get("n_weeks", float("nan"))):
+                lines.append(
+                    "same week       shares correlated "
+                    f"{format_number(portfolio['mean_asset_correlation_weekly'], digits=2)} "
+                    f"vs {format_number(portfolio['mean_asset_correlation'], digits=2)} "
+                    "by day -- the same-day view misses cross-market moves"
+                )
 
     survivors = result.survivors()
     lines.append(

@@ -15,6 +15,7 @@ from ai_stock.portfolio import (
     diversification_ratio,
     effective_number_of_bets,
     sleeve_weights,
+    weekly_returns,
 )
 
 
@@ -319,3 +320,91 @@ def test_asset_returns_must_cover_every_date_the_sleeves_trade() -> None:
 def test_build_portfolio_rejects_an_unknown_scheme() -> None:
     with pytest.raises(ValueError, match="unknown weight scheme"):
         build_portfolio(_sleeves(2), scheme="mean_variance")
+
+
+# --------------------------------------------------------------------------- #
+# Weekly view: sizing the same-day alignment penalty
+# --------------------------------------------------------------------------- #
+def test_weekly_returns_compounds_within_the_week_and_drops_empty_weeks() -> None:
+    # Two full weeks of a constant 1% daily return, then a fortnight of silence,
+    # then one more week. The silent weeks traded on no day and must not appear
+    # as flat (zero) observations.
+    index = pd.DatetimeIndex(
+        list(pd.bdate_range("2024-01-01", periods=10))
+        + list(pd.bdate_range("2024-02-05", periods=5)),
+        name="date",
+    )
+    daily = pd.DataFrame({"a": [0.01] * 15, "b": [0.01] * 15}, index=index)
+    weekly = weekly_returns(daily)
+    assert len(weekly) == 3  # two in January, one in February - the gap is gone
+    assert weekly.to_numpy() == pytest.approx((1.01**5) - 1.0)
+
+
+def test_weekly_returns_needs_a_datetime_index() -> None:
+    daily = pd.DataFrame({"a": [0.0, 0.01], "b": [0.0, 0.01]})
+    with pytest.raises(TypeError, match="DatetimeIndex"):
+        weekly_returns(daily)
+
+
+def test_weekly_view_recovers_a_co_movement_the_date_boundary_hides() -> None:
+    """The whole point: a move that lands on the next date for one sleeve.
+
+    Sleeve ``B`` is sleeve ``A`` one trading day later - the shape of a shared
+    shock that crossed midnight in one market and not the other. Same-day they
+    look independent; within the week they are almost the same series.
+    """
+    index = pd.bdate_range("2018-01-01", periods=500, name="date")
+    rng = np.random.default_rng(7)
+    a = rng.normal(0, 0.01, 500)
+    b = np.empty(500)
+    b[0] = rng.normal(0, 0.01)
+    b[1:] = a[:-1]
+    metrics = build_portfolio(
+        {"A": pd.Series(a, index=index), "B": pd.Series(b, index=index)}
+    ).metrics()
+
+    assert abs(metrics["mean_correlation"]) < 0.15  # invisible day to day
+    assert metrics["mean_correlation_weekly"] > 0.5  # obvious week to week
+    assert metrics["sleeve_alignment_gap"] > 0.4
+    assert metrics["n_weeks"] == pytest.approx(100.0)
+
+
+def test_the_weekly_view_invents_no_gap_when_the_move_is_contemporaneous() -> None:
+    """A same-day shared factor is already fully visible; weekly must not add a gap."""
+    index = pd.bdate_range("2018-01-01", periods=500, name="date")
+    rng = np.random.default_rng(11)
+    common = rng.normal(0, 0.01, 500)
+    metrics = build_portfolio(
+        {
+            "A": pd.Series(common + rng.normal(0, 0.003, 500), index=index),
+            "B": pd.Series(common + rng.normal(0, 0.003, 500), index=index),
+        }
+    ).metrics()
+    assert abs(metrics["sleeve_alignment_gap"]) < 0.1
+
+
+def test_weekly_correlation_covers_the_sleeves_and_the_shares() -> None:
+    portfolio = build_portfolio(
+        _sleeves(3, correlation=0.3, seed=61),
+        asset_returns_by_symbol=_sleeves(3, correlation=0.6, seed=67),
+    )
+    sleeve_weekly = portfolio.weekly_correlation()
+    asset_weekly = portfolio.weekly_asset_correlation()
+    assert list(sleeve_weekly.index) == portfolio.symbols
+    assert list(asset_weekly.index) == portfolio.symbols
+    metrics = portfolio.metrics()
+    assert np.isfinite(metrics["mean_correlation_weekly"])
+    assert np.isfinite(metrics["mean_asset_correlation_weekly"])
+    assert np.isfinite(metrics["asset_alignment_gap"])
+
+
+def test_a_non_datetime_calendar_reports_no_weekly_view() -> None:
+    """A synthetic run indexed by bar number cannot form weeks - and says so, not crashes."""
+    sleeves = {name: series.reset_index(drop=True) for name, series in _sleeves(3, seed=71).items()}
+    portfolio = build_portfolio(sleeves)
+    assert portfolio.weekly_correlation() is None
+    assert portfolio.weekly_asset_correlation() is None
+    metrics = portfolio.metrics()
+    assert math.isnan(metrics["n_weeks"])
+    assert math.isnan(metrics["mean_correlation_weekly"])
+    assert math.isnan(metrics["sleeve_alignment_gap"])

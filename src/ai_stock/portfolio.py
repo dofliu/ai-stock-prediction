@@ -40,6 +40,7 @@ __all__ = [
     "diversification_ratio",
     "effective_number_of_bets",
     "sleeve_weights",
+    "weekly_returns",
 ]
 
 _EPS = 1e-12
@@ -90,6 +91,48 @@ def align_sleeves(returns_by_symbol: Mapping[str, pd.Series]) -> pd.DataFrame:
         rather more.
     """
     return _common(_combined(returns_by_symbol))
+
+
+def weekly_returns(returns: pd.DataFrame) -> pd.DataFrame:
+    """Compound daily returns into calendar-week buckets, dropping weeks nobody traded.
+
+    A same-day correlation is blind to a shared move that straddles a date
+    boundary, which is exactly what happens between markets in different time
+    zones. A shock during New York hours lands on ``MU``'s bar for that date
+    and on a Taipei name's bar for the *next* one, because Taipei has already
+    closed; matching the two by calendar date splits one move across two
+    observations and understates how much they really move together.
+    Compounding into weeks lets both halves fall in one observation, which is
+    what makes the gap between a daily and a weekly correlation a measure of
+    how much the same-day match hid.
+
+    The index must be a :class:`~pandas.DatetimeIndex`. A week in which no
+    sleeve traded is dropped rather than reported as a flat week: an empty
+    bucket compounds to a zero return, and an invented quiet week pulls every
+    correlation towards zero for the same reason :func:`align_sleeves` takes
+    the intersection rather than the union.
+
+    >>> import pandas as pd
+    >>> idx = pd.bdate_range("2024-01-01", periods=10, name="date")
+    >>> daily = pd.DataFrame({"a": [0.01] * 10, "b": [0.01] * 10}, index=idx)
+    >>> weekly = weekly_returns(daily)
+    >>> weekly.shape
+    (2, 2)
+    >>> bool((weekly.round(6) == round((1.01**5) - 1, 6)).to_numpy().all())
+    True
+    """
+    if not isinstance(returns.index, pd.DatetimeIndex):
+        raise TypeError("weekly returns need a DatetimeIndex to bucket dates into weeks")
+    weekly = (1.0 + returns).resample("W").prod() - 1.0
+    traded = returns.resample("W").size().to_numpy() > 0
+    return weekly.loc[traded]
+
+
+def _mean_off_diagonal(correlation: pd.DataFrame) -> float:
+    """Mean of a correlation matrix's upper triangle, or NaN when there is no pair."""
+    matrix = correlation.to_numpy(dtype=float)
+    off_diagonal = matrix[np.triu_indices(len(matrix), k=1)]
+    return float(np.mean(off_diagonal)) if off_diagonal.size else float("nan")
 
 
 def sleeve_weights(sleeves: pd.DataFrame, scheme: str = "equal") -> pd.Series:
@@ -231,6 +274,37 @@ class PortfolioResult:
         """Correlation of the underlying shares, for contrast with the sleeves."""
         return None if self.assets is None else self.assets.corr()
 
+    def _weekly(self, frame: pd.DataFrame | None) -> pd.DataFrame | None:
+        """Weekly-compounded returns, or None when the calendar cannot support them.
+
+        None rather than an exception, because a weekly view is a diagnostic
+        the daily numbers can do without: a non-datetime index (a synthetic run
+        indexed by bar number) or a sample too short to hold two weeks simply
+        means the alignment gap is not reported, not that the portfolio is
+        unmeasurable.
+        """
+        if frame is None or not isinstance(self.sleeves.index, pd.DatetimeIndex):
+            return None
+        weekly = weekly_returns(frame)
+        return weekly if len(weekly) >= 2 else None
+
+    def weekly_correlation(self) -> pd.DataFrame | None:
+        """Sleeve-return correlation at weekly frequency, or None if it cannot be formed.
+
+        The gap between this and :meth:`correlation` is the co-movement the
+        same-day calendar match could not see. It falls almost entirely on
+        cross-market pairs and leaves same-market pairs alone, which is the
+        signature of a time-zone artefact rather than a real change in how the
+        sleeves move together.
+        """
+        weekly = self._weekly(self.sleeves)
+        return None if weekly is None else weekly.corr()
+
+    def weekly_asset_correlation(self) -> pd.DataFrame | None:
+        """Buy-and-hold correlation at weekly frequency, contrasting :meth:`asset_correlation`."""
+        weekly = self._weekly(self.assets)
+        return None if weekly is None else weekly.corr()
+
     def risk_contributions(self) -> pd.Series:
         """Each sleeve's share of portfolio variance, summing to one.
 
@@ -290,6 +364,7 @@ class PortfolioResult:
         )
         correlation = self.correlation().to_numpy(dtype=float)
         off_diagonal = correlation[np.triu_indices(len(self.symbols), k=1)]
+        mean_correlation = float(np.mean(off_diagonal)) if off_diagonal.size else float("nan")
         ratio = diversification_ratio(self.covariance(), self.weights)
         independent = self.sharpe_if_independent()
 
@@ -297,10 +372,22 @@ class PortfolioResult:
             asset_correlation = float("nan")
             asset_bets = float("nan")
         else:
-            asset_matrix = self.assets.corr().to_numpy(dtype=float)
-            asset_off = asset_matrix[np.triu_indices(len(self.symbols), k=1)]
-            asset_correlation = float(np.mean(asset_off)) if asset_off.size else float("nan")
+            asset_correlation = _mean_off_diagonal(self.assets.corr())
             asset_bets = effective_number_of_bets(self.assets.cov(ddof=1), self.weights)
+
+        # Same-day correlations understate the co-movement of markets in
+        # different time zones; a weekly view sizes how much (see weekly_returns).
+        weekly_sleeves = self._weekly(self.sleeves)
+        weekly_assets = self._weekly(self.assets)
+        n_weeks = float(len(weekly_sleeves)) if weekly_sleeves is not None else float("nan")
+        mean_correlation_weekly = (
+            _mean_off_diagonal(weekly_sleeves.corr())
+            if weekly_sleeves is not None
+            else float("nan")
+        )
+        mean_asset_correlation_weekly = (
+            _mean_off_diagonal(weekly_assets.corr()) if weekly_assets is not None else float("nan")
+        )
 
         merged.update(
             {
@@ -308,9 +395,7 @@ class PortfolioResult:
                 "mean_asset_correlation": asset_correlation,
                 "asset_effective_bets": asset_bets,
                 "common_fraction": float(self.common_fraction),
-                "mean_correlation": float(np.mean(off_diagonal))
-                if off_diagonal.size
-                else float("nan"),
+                "mean_correlation": mean_correlation,
                 "max_correlation": float(np.max(off_diagonal))
                 if off_diagonal.size
                 else float("nan"),
@@ -321,6 +406,11 @@ class PortfolioResult:
                 "effective_bets": float(ratio**2),
                 "sharpe_if_independent": independent,
                 "sharpe_diversification_gap": float(independent - merged["sharpe"]),
+                "n_weeks": n_weeks,
+                "mean_correlation_weekly": mean_correlation_weekly,
+                "mean_asset_correlation_weekly": mean_asset_correlation_weekly,
+                "sleeve_alignment_gap": mean_correlation_weekly - mean_correlation,
+                "asset_alignment_gap": mean_asset_correlation_weekly - asset_correlation,
             }
         )
         return merged
