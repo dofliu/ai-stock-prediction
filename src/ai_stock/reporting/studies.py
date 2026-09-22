@@ -12,6 +12,7 @@ import pandas as pd
 from ai_stock.config import ExperimentConfig
 from ai_stock.journal import ScoreResult
 from ai_stock.pipeline import ModelRun, ScreenResult, SimulationBundle, deflated_sharpe_ratios
+from ai_stock.portfolio import PortfolioResult
 from ai_stock.reporting.report import (
     Report,
     ascii_bars,
@@ -484,6 +485,49 @@ def _sleeve_vs_asset_verdict(metrics: dict[str, float]) -> str:
     )
 
 
+def _alignment_section(
+    report: Report, portfolio: PortfolioResult, metrics: dict[str, float]
+) -> None:
+    """Size the same-day alignment penalty by re-measuring correlation weekly.
+
+    Every correlation in this section is measured on same-day returns, and a
+    date does not mean the same hours in every market. Recomputing on weekly
+    returns lets a shared move that straddled a date boundary land in one
+    observation; the gap between the two frequencies is how much the same-day
+    match could not see, and therefore how much the bet counts are flattered.
+    """
+    if not np.isfinite(metrics["n_weeks"]):
+        return
+
+    report.heading("Same day, or same week?", level=3)
+    report.text(
+        f"Every correlation above is same-day. Recomputed on the {int(metrics['n_weeks']):,} "
+        "overlapping calendar weeks, the sleeves correlate "
+        f"{format_number(metrics['mean_correlation_weekly'])} against "
+        f"{format_number(metrics['mean_correlation'])} by day. A shared move that crosses "
+        "midnight in one market but not the other is split across two dates, so the same-day "
+        "figure cannot see it - and every bet count above is flattered by however much of this "
+        "difference is real co-movement rather than the noise a coarser sample adds."
+    )
+
+    weekly_assets = portfolio.weekly_asset_correlation()
+    if weekly_assets is not None:
+        report.text(
+            "The shares move the same way: "
+            f"{format_number(metrics['mean_asset_correlation'])} correlated by day, "
+            f"{format_number(metrics['mean_asset_correlation_weekly'])} by week. The gap falls on "
+            "the pairs whose markets keep different hours and barely touches the pairs that "
+            "already share a trading calendar, which is what a time-zone artefact looks like and "
+            "what a genuine change in how the names move together would not."
+        )
+
+    report.heading("Correlation of the sleeve returns, weekly", level=4)
+    report.dataframe(portfolio.weekly_correlation())
+    if weekly_assets is not None:
+        report.heading("Correlation of the shares themselves, weekly", level=4)
+        report.dataframe(weekly_assets)
+
+
 def _portfolio_section(report: Report, result: ScreenResult) -> None:
     """Append what the ranking cannot say: how many bets these symbols really are.
 
@@ -557,6 +601,8 @@ def _portfolio_section(report: Report, result: ScreenResult) -> None:
         report.heading("Correlation of the shares themselves (buy & hold)", level=3)
         report.dataframe(asset_correlation)
 
+    _alignment_section(report, portfolio, metrics)
+
     report.bullets(
         [
             "`effective number of bets` is the squared diversification ratio. For equally "
@@ -575,10 +621,10 @@ def _portfolio_section(report: Report, result: ScreenResult) -> None:
             "calendar here. A holiday in one market is not a quiet day for that sleeve, so "
             "filling it with a zero would flatter every number in this section.",
             "Symbols in different time zones are matched by calendar date, and a date does "
-            "not mean the same hours in Taipei as it does in New York. A same-day "
-            "correlation across those two markets is understated, and the effective bet "
-            "count correspondingly flattered, because part of the shared move lands on the "
-            "next date for one of them.",
+            "not mean the same hours in Taipei as it does in New York, so a same-day "
+            "correlation across those two markets is understated and the effective bet count "
+            "correspondingly flattered. The `Same day, or same week?` section sizes that: the "
+            "weekly correlation is the same number with the date-boundary split removed.",
             "Weights are fixed for the whole sample and no scheme here looks at the "
             "correlation matrix. Fitting weights to the same correlations they are then "
             "scored against would make this section a backtest of itself.",

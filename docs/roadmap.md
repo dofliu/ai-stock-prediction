@@ -39,14 +39,6 @@ Keep each item small enough to land in one reviewed pull request.
   diversification was supposed to cushion. A rolling window would show whether
   the bet count collapses when it matters, the same way `hit_rate_z` over the
   journal's timeline shows *when* a decay started.
-- [ ] **Time-zone-aware alignment for cross-market correlation.** Matching a
-  Taipei bar to a New York bar by calendar date understates their correlation:
-  part of a shared move lands on the next date for one of them. Lagging one
-  market by a bar, or comparing weekly returns, would size the effect. It is
-  visible in the current output - `MU` correlates 0.13-0.19 with the Taiwan
-  names against 0.46-0.65 among themselves - so the effective bet count is
-  currently flattered by an unknown amount.
-
 ## Later
 
 - [ ] **Intraday or weekly bars.** The whole framework assumes daily.
@@ -58,6 +50,33 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Done
 
+- [x] Time-zone-aware alignment for cross-market correlation, sized by weekly
+  returns. Matching a Taipei bar to a New York bar by calendar date splits a
+  shared move that crosses midnight across two dates, so the same-day
+  correlation understates it and the effective bet count is flattered.
+  `weekly_returns` compounds the sleeves into calendar weeks (dropping weeks
+  nobody traded, the same reason `align_sleeves` intersects rather than
+  unions), and `PortfolioResult.weekly_correlation` /
+  `weekly_asset_correlation` re-measure the correlation there.
+  `metrics()` gains `mean_correlation_weekly`, `mean_asset_correlation_weekly`,
+  `n_weeks` and the two `*_alignment_gap`s; the screen report's `Same day, or
+  same week?` section prints both frequencies side by side.
+
+  Chose weekly returns over lagging one market by a bar, because the lag needs
+  a hardcoded map of which symbol trades in which market - coupling a
+  symbol-agnostic module to `config/universe.txt` - and taking the best
+  correlation over a set of candidate lags is a max-over-noise the rest of
+  this project spends its effort removing. Weekly is one pre-committed
+  alternative frequency with no selection in it. The effective bet count is
+  left on daily returns with the gap reported as a caveat, not recomputed
+  weekly: switching to whichever frequency shows the highest correlation would
+  be the same after-the-fact choice the section already refuses for weights.
+  On the four real symbols the mean buy-and-hold correlation rises from 0.34
+  (daily) to 0.47 (weekly), and the rise sits entirely on the cross-market
+  `MU` pairs (0.13-0.17 -> 0.33-0.45) while the same-market Taiwan pairs barely
+  move - the fingerprint of a time-zone artefact rather than a real change in
+  co-movement. The residual limitation is that it is measured post-intersection
+  and on one alternative frequency; it sizes the effect, it does not correct it.
 - [x] Fail the daily workflow on a stale feed. `ai-stock journal
   --fail-if-stale [DAYS]` exits 3 when no symbol has a bar newer than DAYS,
   turning `data_freshness`'s observation into an alarm a scheduler can act on.
