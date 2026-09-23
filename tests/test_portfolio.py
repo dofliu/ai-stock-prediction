@@ -10,10 +10,12 @@ import pytest
 
 from ai_stock.config import TRADING_DAYS_PER_YEAR
 from ai_stock.portfolio import (
+    ROLLING_WINDOW,
     align_sleeves,
     build_portfolio,
     diversification_ratio,
     effective_number_of_bets,
+    rolling_effective_bets,
     sleeve_weights,
     weekly_returns,
 )
@@ -408,3 +410,214 @@ def test_a_non_datetime_calendar_reports_no_weekly_view() -> None:
     assert math.isnan(metrics["n_weeks"])
     assert math.isnan(metrics["mean_correlation_weekly"])
     assert math.isnan(metrics["sleeve_alignment_gap"])
+
+
+# --------------------------------------------------------------------------- #
+# Rolling diversification
+# --------------------------------------------------------------------------- #
+def _regime_switching_sleeves(
+    n_sleeves: int = 4,
+    *,
+    n_days: int = 500,
+    calm_correlation: float = 0.0,
+    stressed_correlation: float = 0.9,
+    stressed_drift: float = 0.0,
+    seed: int = 0,
+) -> dict[str, pd.Series]:
+    """Sleeves that are independent for the first half and herd for the second.
+
+    The case the full-sample bet count cannot describe: one number averaged
+    over both halves reports a diversification that existed in neither.
+    ``stressed_drift`` pushes the correlated half downwards, so the herding
+    lands inside a drawdown rather than beside one.
+    """
+    rng = np.random.default_rng(seed)
+    index = pd.bdate_range("2020-01-01", periods=n_days, name="date")
+    half = n_days // 2
+    correlation = np.concatenate(
+        [np.full(half, calm_correlation), np.full(n_days - half, stressed_correlation)]
+    )
+    drift = np.concatenate([np.zeros(half), np.full(n_days - half, stressed_drift)])
+    common = rng.standard_normal(n_days)
+    out = {}
+    for i in range(n_sleeves):
+        idiosyncratic = rng.standard_normal(n_days)
+        mixed = np.sqrt(correlation) * common + np.sqrt(1.0 - correlation) * idiosyncratic
+        out[f"S{i}"] = pd.Series(mixed * 0.01 + drift, index=index, name="returns")
+    return out
+
+
+def test_rolling_bets_finds_a_collapse_the_pooled_count_averages_away() -> None:
+    portfolio = build_portfolio(_regime_switching_sleeves(4, seed=101))
+    rolling = portfolio.rolling_bets(window=63)
+
+    calm = rolling["effective_bets"].iloc[:180]
+    stressed = rolling["effective_bets"].iloc[-180:]
+    # Four independent sleeves are ~4 bets; four correlated at 0.9 are
+    # 4 / (1 + 3 * 0.9) = 1.08.
+    assert calm.mean() > 3.0
+    assert stressed.mean() < 1.6
+    # The pooled count sits between the two and describes neither half.
+    pooled = portfolio.metrics()["effective_bets"]
+    assert stressed.mean() < pooled < calm.mean()
+
+
+def test_rolling_bets_is_indexed_by_the_last_day_of_each_window() -> None:
+    portfolio = build_portfolio(_sleeves(3, n_days=200, correlation=0.4, seed=103))
+    rolling = portfolio.rolling_bets(window=63)
+
+    assert list(rolling.index) == list(portfolio.sleeves.index[62:])
+    assert len(rolling) == len(portfolio.sleeves) - 62
+    assert list(rolling.columns) == ["mean_correlation", "effective_bets", "drawdown"]
+
+
+def test_rolling_bets_holds_the_traded_weights_rather_than_reweighting_each_window() -> None:
+    """Re-deriving inverse_vol per window would score a portfolio nobody traded.
+
+    The obvious-looking "improvement" is to recompute the weights inside each
+    window so they match the volatilities there. That is a different,
+    adaptive strategy - it rebalances on information the fixed allocation
+    never acted on - and reporting its bet count beside a fixed-weight Sharpe
+    would credit the portfolio with a decision it did not make.
+    """
+    sleeves = _regime_switching_sleeves(3, seed=107)
+    # Make one sleeve's volatility jump half-way, so per-window inverse_vol
+    # weights would move a long way from the fixed ones.
+    sleeves["S0"] = sleeves["S0"].copy()
+    sleeves["S0"].iloc[250:] *= 5.0
+    portfolio = build_portfolio(sleeves, scheme="inverse_vol")
+
+    fixed = portfolio.rolling_bets(window=63)["effective_bets"].to_numpy()
+    standalone = rolling_effective_bets(portfolio.sleeves, portfolio.weights, window=63)
+    assert np.allclose(fixed, standalone["effective_bets"].to_numpy())
+
+    adaptive = np.array(
+        [
+            effective_number_of_bets(
+                portfolio.sleeves.iloc[end - 63 : end].cov(ddof=1),
+                sleeve_weights(portfolio.sleeves.iloc[end - 63 : end], "inverse_vol"),
+            )
+            for end in range(63, len(portfolio.sleeves) + 1)
+        ]
+    )
+    assert not np.allclose(fixed, adaptive)
+
+
+def test_the_bet_count_collapses_inside_the_drawdown_it_was_meant_to_cushion() -> None:
+    portfolio = build_portfolio(_regime_switching_sleeves(4, stressed_drift=-0.004, seed=109))
+    by_drawdown = portfolio.bets_by_drawdown(window=63)
+
+    assert list(by_drawdown.index) == ["deep_drawdown", "mid_drawdown", "shallow_drawdown"]
+    # Deepest first, by construction of the quantile bins.
+    assert (
+        by_drawdown.loc["deep_drawdown", "mean_drawdown"]
+        < by_drawdown.loc["shallow_drawdown", "mean_drawdown"]
+    )
+    assert (
+        by_drawdown.loc["deep_drawdown", "effective_bets"]
+        < by_drawdown.loc["shallow_drawdown", "effective_bets"]
+    )
+
+    metrics = portfolio.metrics()
+    assert metrics["effective_bets_stress_gap"] < 0
+    # A collapse this large survives the deflation for overlapping windows.
+    assert metrics["effective_bets_stress_z"] < -2.0
+    assert metrics["effective_bets_stress_z_naive"] < metrics["effective_bets_stress_z"]
+    assert metrics["effective_bets_min"] <= metrics["effective_bets_deep_drawdown"]
+    assert metrics["n_rolling_windows"] == len(portfolio.rolling_bets())
+
+
+def test_a_gap_inside_the_noise_is_not_reported_as_a_collapse() -> None:
+    """The failure this section exists to avoid: a tenth of a bet read as a finding.
+
+    Sleeves with one stable correlation throughout still split into drawdown
+    terciles whose mean bet counts differ a little, because everything
+    measured over a finite sample differs a little. The raw gap can land
+    either way; the deflated z is what decides whether it means anything, and
+    with no regime change to find it must not clear the bar.
+    """
+    portfolio = build_portfolio(_sleeves(4, n_days=750, correlation=0.4, seed=139))
+    metrics = portfolio.metrics()
+
+    assert np.isfinite(metrics["effective_bets_stress_gap"])
+    assert abs(metrics["effective_bets_stress_z"]) < 2.0
+    # Deflating for the window overlap always shrinks the claim, never inflates it.
+    assert abs(metrics["effective_bets_stress_z"]) < abs(metrics["effective_bets_stress_z_naive"])
+
+
+def test_the_stress_z_is_the_gap_over_its_own_deflated_standard_error() -> None:
+    portfolio = build_portfolio(_regime_switching_sleeves(4, stressed_drift=-0.004, seed=149))
+    rolling = portfolio.rolling_bets()
+    bins = pd.qcut(rolling["drawdown"], 3, duplicates="drop")
+    deep, shallow = bins.cat.categories[0], bins.cat.categories[-1]
+    left = rolling["effective_bets"][bins == deep]
+    right = rolling["effective_bets"][bins == shallow]
+
+    window = ROLLING_WINDOW
+    error = math.sqrt(
+        left.var(ddof=1) / max(len(left) / window, 1.0)
+        + right.var(ddof=1) / max(len(right) / window, 1.0)
+    )
+    expected = (left.mean() - right.mean()) / error
+    assert portfolio.metrics()["effective_bets_stress_z"] == pytest.approx(expected)
+
+
+def test_drawdown_is_measured_against_the_peak_so_far_not_the_whole_sample() -> None:
+    """A causal drawdown; a full-sample maximum would leak the future into the split."""
+    index = pd.bdate_range("2024-01-01", periods=5, name="date")
+    sleeves = {"A": pd.Series([0.1, -0.5, 0.0, 0.0, 2.0], index=index)}
+    portfolio = build_portfolio(sleeves)
+    drawdown = portfolio.drawdown()
+
+    assert drawdown.iloc[0] == pytest.approx(0.0)  # a new high is not a drawdown
+    assert drawdown.iloc[1] == pytest.approx(-0.5)
+    assert drawdown.iloc[-1] == pytest.approx(0.0)  # a later high does not rewrite an earlier one
+
+
+def test_a_portfolio_that_only_made_new_highs_has_no_stress_to_condition_on() -> None:
+    index = pd.bdate_range("2024-01-01", periods=120, name="date")
+    sleeves = {name: pd.Series(0.001, index=index) for name in ("A", "B")}
+    portfolio = build_portfolio(sleeves)
+
+    assert portfolio.bets_by_drawdown(window=63).empty
+    metrics = portfolio.metrics()
+    assert math.isnan(metrics["effective_bets_stress_gap"])
+
+
+def test_a_sample_shorter_than_the_window_reports_no_rolling_view() -> None:
+    portfolio = build_portfolio(_sleeves(3, n_days=40, correlation=0.3, seed=113))
+
+    rolling = portfolio.rolling_bets(window=63)
+    assert rolling.empty
+    assert list(rolling.columns) == ["mean_correlation", "effective_bets", "drawdown"]
+    assert portfolio.bets_by_drawdown(window=63).empty
+
+    metrics = portfolio.metrics()
+    assert metrics["n_rolling_windows"] == 0.0
+    assert math.isnan(metrics["effective_bets_min"])
+    assert math.isnan(metrics["effective_bets_stress_gap"])
+    assert math.isnan(metrics["effective_bets_stress_z"])
+    # The full-sample numbers are unaffected by the missing rolling view.
+    assert np.isfinite(metrics["effective_bets"])
+
+
+def test_rolling_effective_bets_rejects_a_window_too_short_to_correlate() -> None:
+    sleeves = align_sleeves(_sleeves(2, n_days=100, seed=127))
+    with pytest.raises(ValueError, match="at least 2"):
+        rolling_effective_bets(sleeves, pd.Series([0.5, 0.5], index=sleeves.columns), window=1)
+
+
+def test_rolling_effective_bets_rejects_a_mismatched_weight_vector() -> None:
+    sleeves = align_sleeves(_sleeves(3, n_days=100, seed=131))
+    with pytest.raises(ValueError, match="weight"):
+        rolling_effective_bets(sleeves, np.array([0.5, 0.5]), window=63)
+
+
+def test_rolling_correlation_tracks_the_bet_count_it_explains() -> None:
+    portfolio = build_portfolio(_regime_switching_sleeves(4, seed=137))
+    rolling = portfolio.rolling_bets(window=63)
+
+    assert rolling["mean_correlation"].iloc[:180].mean() < 0.2
+    assert rolling["mean_correlation"].iloc[-180:].mean() > 0.8
+    # More correlation, fewer bets - the relationship the section exists to show.
+    assert rolling["mean_correlation"].corr(rolling["effective_bets"]) < -0.8
