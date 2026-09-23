@@ -528,6 +528,103 @@ def _alignment_section(
         report.dataframe(weekly_assets)
 
 
+def _rolling_bets_section(
+    report: Report, portfolio: PortfolioResult, metrics: dict[str, float]
+) -> None:
+    """Show whether the bet count held up when the portfolio was underwater.
+
+    The effective bet count above is a full-sample average, and an average
+    over calm and stressed alike is the wrong summary for a quantity bought
+    as insurance: correlations rise in drawdowns, so the diversification is
+    thinnest in exactly the weeks it was supposed to cushion. This section
+    re-measures it over a trailing quarter and conditions on the drawdown.
+    """
+    rolling = portfolio.rolling_bets()
+    if rolling.empty:
+        return
+
+    window = int(metrics["rolling_window"])
+    report.heading("Did the diversification hold when it mattered?", level=3)
+    report.text(
+        f"The count above is a full-sample average. Re-measured over a trailing {window}-day "
+        f"window it ranges down to {format_number(metrics['effective_bets_min'], digits=2)} "
+        f"bets at its thinnest, against {format_number(metrics['effective_bets'], digits=2)} "
+        f"pooled, across {int(metrics['n_rolling_windows']):,} windows."
+    )
+
+    report.code_block(
+        ascii_line_chart(
+            {"effective bets": rolling["effective_bets"]},
+            title=f"Effective bets over a trailing {window} days",
+        )
+    )
+
+    by_drawdown = portfolio.bets_by_drawdown()
+    if not by_drawdown.empty:
+        report.heading("Bet count by how far underwater the portfolio was", level=4)
+        report.dataframe(by_drawdown)
+
+    z = metrics["effective_bets_stress_z"]
+    if np.isfinite(z):
+        deep = format_number(metrics["effective_bets_deep_drawdown"], digits=2)
+        shallow = format_number(metrics["effective_bets_shallow_drawdown"], digits=2)
+        observed = (
+            f"In the third of windows where the drawdown was deepest the sleeves behaved like "
+            f"**{deep} bets**, against {shallow} in the shallowest third "
+            f"(z = {format_number(z)}; naive z = "
+            f"{format_number(metrics['effective_bets_stress_z_naive'])})."
+        )
+        if z <= -2.0:
+            verdict = (
+                "The diversification thinned when it was needed, by more than the overlap in "
+                "these windows can explain. That is the direction that costs money: a "
+                "portfolio Sharpe computed on the pooled correlation is quoting a cushion the "
+                "drawdowns did not have."
+            )
+        elif z >= 2.0:
+            verdict = (
+                "The count held up under stress over this sample. Worth knowing, and worth "
+                "not over-reading: one sample holds few genuinely distinct drawdowns, and the "
+                "classic failure is a correlation that holds until the episode that breaks it."
+            )
+        else:
+            verdict = (
+                "That difference is inside the noise, so this sample cannot say whether the "
+                "diversification holds up under stress - which is not the same as saying it "
+                "does. Read it as an answer not yet earned rather than a clean bill of "
+                "health, and note that the failure being tested for is a tail event a quiet "
+                "sample would not contain in the first place."
+            )
+        report.text(f"{observed} {verdict}")
+
+    report.bullets(
+        [
+            f"The {window}-day window is one calendar quarter, fixed in the code rather than "
+            "chosen here. A window selected because it made the line look steadier - or "
+            "sharper - would make this section a backtest of its own presentation.",
+            "Windows overlap by all but one day, so the points are not independent "
+            "observations and the minimum is a minimum over many correlated draws. Read the "
+            "shape of the line and the conditional table; do not read the low point as the "
+            "worst quarter that could happen.",
+            "Both the bet count and the drawdown are causal at each date - the window ends "
+            "there and the peak is the highest equity seen up to there - so the conditioning "
+            "uses nothing that was not knowable on the day.",
+            'Drawdown bins are terciles, not a chosen threshold. "Underwater by more than '
+            'x%" invites x to be picked once the answer is visible; a tercile split has '
+            "nothing left to choose.",
+            "The stress `z` deflates each tercile's window count by the window length, on "
+            "the assumption that a window-length span is worth one read of the market. "
+            "`naive z` assumes the opposite - that every overlapping window counts in full - "
+            "so the honest figure lies between them, and while they disagree, believe the "
+            "smaller. A gap of a tenth of a bet is not a finding however many overlapping "
+            "windows it is averaged over.",
+            "The weights are the same fixed ones used everywhere else in this section. "
+            "Re-deriving `inverse_vol` inside each window would score an adaptive portfolio "
+            "that was never traded.",
+        ]
+    )
+
+
 def _portfolio_section(report: Report, result: ScreenResult) -> None:
     """Append what the ranking cannot say: how many bets these symbols really are.
 
@@ -601,6 +698,7 @@ def _portfolio_section(report: Report, result: ScreenResult) -> None:
         report.heading("Correlation of the shares themselves (buy & hold)", level=3)
         report.dataframe(asset_correlation)
 
+    _rolling_bets_section(report, portfolio, metrics)
     _alignment_section(report, portfolio, metrics)
 
     report.bullets(

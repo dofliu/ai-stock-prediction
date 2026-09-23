@@ -33,12 +33,14 @@ from ai_stock.config import TRADING_DAYS_PER_YEAR
 from ai_stock.evaluation.metrics import financial_metrics
 
 __all__ = [
+    "ROLLING_WINDOW",
     "WEIGHT_SCHEMES",
     "PortfolioResult",
     "align_sleeves",
     "build_portfolio",
     "diversification_ratio",
     "effective_number_of_bets",
+    "rolling_effective_bets",
     "sleeve_weights",
     "weekly_returns",
 ]
@@ -47,6 +49,16 @@ _EPS = 1e-12
 
 WEIGHT_SCHEMES = ("equal", "inverse_vol")
 """Weighting rules `build_portfolio` accepts. Neither one reads a correlation."""
+
+ROLLING_WINDOW = 63
+"""Trailing window, in trading days, for the rolling diversification view.
+
+One calendar quarter, pre-committed rather than chosen. A window picked
+because it made the bet count look steadiest - or because it made the
+collapse look worst - would be the same after-the-fact selection this module
+refuses for weights, and the rolling series exists precisely to be read as
+evidence.
+"""
 
 
 def _combined(returns_by_symbol: Mapping[str, pd.Series]) -> pd.DataFrame:
@@ -235,6 +247,123 @@ def effective_number_of_bets(
     return float(diversification_ratio(covariance, weights) ** 2)
 
 
+def rolling_effective_bets(
+    sleeves: pd.DataFrame,
+    weights: pd.Series | np.ndarray,
+    window: int = ROLLING_WINDOW,
+) -> pd.DataFrame:
+    """Mean pairwise correlation and effective bet count over each trailing window.
+
+    :func:`effective_number_of_bets` on the full sample answers "how many bets
+    was this on average". That is the wrong question in the one situation the
+    count is bought for: correlations rise in drawdowns, so the
+    diversification tends to be thinnest exactly when it was supposed to
+    cushion. A trailing window says *when* the count collapsed, the same way a
+    rolling ``hit_rate_z`` over the journal says when a decay started.
+
+    The weights are held fixed at the ones passed in rather than re-derived
+    inside each window. A portfolio is not re-weighted by this function: an
+    ``inverse_vol`` allocation recomputed window by window is a different,
+    adaptive strategy that was never traded, and scoring it here would quietly
+    hand the section a decision it did not make.
+
+    Both columns are causal at their index date - the window ends there - so
+    the series can be read against a drawdown of the same portfolio without a
+    look-ahead. What it is not is a series of independent observations:
+    consecutive windows share ``window - 1`` days, so the minimum over a long
+    sample is a minimum over many overlapping draws and is biased low.
+
+    Returns a frame indexed by each window's last date, with columns
+    ``mean_correlation`` and ``effective_bets``. A sample shorter than
+    ``window`` yields an empty frame rather than an exception, the same way
+    :meth:`~ai_stock.evaluation.walkforward.WalkForwardResult.regime_metrics`
+    returns an empty frame when it cannot bin: a rolling view is a diagnostic
+    the full-sample numbers can do without.
+
+    >>> import numpy as np, pandas as pd
+    >>> index = pd.bdate_range("2020-01-01", periods=8, name="date")
+    >>> frame = pd.DataFrame(
+    ...     np.random.default_rng(0).standard_normal((8, 2)), index=index, columns=["a", "b"]
+    ... )
+    >>> weights = pd.Series([0.5, 0.5], index=["a", "b"])
+    >>> rolling = rolling_effective_bets(frame, weights, window=4)
+    >>> list(rolling.columns)
+    ['mean_correlation', 'effective_bets']
+    >>> list(rolling.index) == list(index[3:])
+    True
+    >>> rolling_effective_bets(frame, weights, window=20).empty
+    True
+    """
+    if window < 2:
+        raise ValueError(f"a rolling correlation needs a window of at least 2, got {window}")
+    values = sleeves.to_numpy(dtype=float)
+    vector = np.asarray(weights, dtype=float).ravel()
+    if vector.shape[0] != values.shape[1]:
+        raise ValueError(f"{vector.shape[0]} weight(s) but {values.shape[1]} sleeve(s)")
+
+    n_rows = values.shape[0]
+    columns = ["mean_correlation", "effective_bets"]
+    if n_rows < window:
+        return pd.DataFrame(columns=columns, index=sleeves.index[:0], dtype=float)
+
+    upper = np.triu_indices(values.shape[1], k=1)
+    rows = []
+    for end in range(window, n_rows + 1):
+        covariance = np.cov(values[end - window : end], rowvar=False, ddof=1)
+        covariance = np.atleast_2d(covariance)
+        deviations = np.sqrt(np.clip(np.diag(covariance), 0.0, None))
+        outer = np.outer(deviations, deviations)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            correlation = np.where(
+                outer > _EPS, covariance / np.where(outer > _EPS, outer, 1.0), np.nan
+            )
+        pairs = correlation[upper]
+        rows.append(
+            (
+                float(np.mean(pairs)) if pairs.size else float("nan"),
+                effective_number_of_bets(covariance, vector),
+            )
+        )
+    return pd.DataFrame(rows, columns=columns, index=sleeves.index[window - 1 :])
+
+
+def _drawdown_labels(n_bins: int) -> list[str]:
+    """Bin names ordered as ``pd.qcut`` orders them: deepest drawdown first."""
+    if n_bins == 3:
+        return ["deep_drawdown", "mid_drawdown", "shallow_drawdown"]
+    return [f"drawdown_q{i + 1}_of_{n_bins}" for i in range(n_bins)]
+
+
+def _stress_z(deep: pd.Series, shallow: pd.Series, window: int) -> tuple[float, float]:
+    """How many standard errors separate two tercile means, deflated and naive.
+
+    A difference of a tenth of a bet between two terciles is not a finding,
+    and printing it as one is the failure this whole project is written
+    against. The deflated figure is the one to read: rolling windows overlap
+    by all but one day, so a tercile holding ``m`` windows does not hold ``m``
+    reads of the market. Dividing by ``window`` assumes total redundancy
+    within any window-length span, the same worst case
+    :func:`~ai_stock.journal.independent_blocks` assumes for the forecast
+    journal, and the naive figure - which assumes none - is returned beside it
+    for the same reason ``hit_rate_z_naive`` is: the honest answer lies
+    between them, and while they disagree, believe the smaller.
+    """
+    if len(deep) < 2 or len(shallow) < 2:
+        return float("nan"), float("nan")
+    gap = float(deep.mean() - shallow.mean())
+    variances = (float(deep.var(ddof=1)), float(shallow.var(ddof=1)))
+    counts = (float(len(deep)), float(len(shallow)))
+    if not all(np.isfinite(variances)):
+        return float("nan"), float("nan")
+
+    def z_at(scale: float) -> float:
+        effective = [max(count / scale, 1.0) for count in counts]
+        error = math.sqrt(sum(v / n for v, n in zip(variances, effective, strict=True)))
+        return gap / error if error > _EPS else float("nan")
+
+    return z_at(float(window)), z_at(1.0)
+
+
 @dataclass(frozen=True)
 class PortfolioResult:
     """Several single-asset strategies held together, and what that costs in diversification."""
@@ -304,6 +433,87 @@ class PortfolioResult:
         """Buy-and-hold correlation at weekly frequency, contrasting :meth:`asset_correlation`."""
         weekly = self._weekly(self.assets)
         return None if weekly is None else weekly.corr()
+
+    def drawdown(self) -> pd.Series:
+        """Portfolio drawdown from its running peak, at every date.
+
+        Causal by construction: the peak at date ``t`` is the highest equity
+        seen up to ``t``, so pairing this with :meth:`rolling_bets` compares
+        two quantities that were both knowable on the day.
+        """
+        equity = self.equity.to_numpy(dtype=float)
+        peak = np.maximum.accumulate(equity)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            values = np.where(peak > _EPS, equity / np.where(peak > _EPS, peak, 1.0) - 1.0, np.nan)
+        return pd.Series(values, index=self.equity.index, name="drawdown")
+
+    def rolling_bets(self, window: int = ROLLING_WINDOW) -> pd.DataFrame:
+        """Rolling diversification, and the drawdown each window ended in.
+
+        :func:`rolling_effective_bets` with the portfolio's own fixed weights,
+        plus a ``drawdown`` column so the two can be read together. Empty when
+        the shared calendar is shorter than ``window``.
+        """
+        frame = rolling_effective_bets(self.sleeves, self.weights, window=window)
+        if frame.empty:
+            frame = frame.copy()
+            frame["drawdown"] = pd.Series(dtype=float)
+            return frame
+        frame = frame.copy()
+        frame["drawdown"] = self.drawdown().reindex(frame.index)
+        return frame
+
+    def _drawdown_bins(
+        self, window: int = ROLLING_WINDOW, n_bins: int = 3
+    ) -> tuple[pd.DataFrame, pd.Series, list[str]] | None:
+        """The rolling frame, its windows binned by drawdown, and the bin names.
+
+        None when there is nothing to condition on: no rolling view, or a
+        drawdown too degenerate to split.
+        """
+        rolling = self.rolling_bets(window=window)
+        if rolling.empty:
+            return None
+        drawdown = rolling["drawdown"].dropna()
+        if len(drawdown.unique()) < 2:
+            return None
+
+        bins = pd.qcut(drawdown, min(n_bins, len(drawdown.unique())), duplicates="drop")
+        labels = _drawdown_labels(len(bins.cat.categories))
+        return rolling, bins.cat.rename_categories(labels), labels
+
+    def bets_by_drawdown(self, window: int = ROLLING_WINDOW, n_bins: int = 3) -> pd.DataFrame:
+        """Rolling bet counts grouped into quantile bins of the drawdown they sat in.
+
+        The question the full-sample count cannot answer: is the
+        diversification thinner when the portfolio is underwater? Bins are
+        quantiles of the drawdown at each window's end, so each holds roughly
+        the same number of windows, and they are labelled deepest-first.
+
+        Quantiles, not a threshold. "Underwater by more than x%" invites x to
+        be chosen once the answer is visible; a tercile split has nothing to
+        choose. Empty when there is no rolling view, or when the drawdown is
+        too degenerate to bin - a portfolio that only ever made new highs has
+        no stress to condition on.
+        """
+        binned = self._drawdown_bins(window=window, n_bins=n_bins)
+        if binned is None:
+            return pd.DataFrame()
+        rolling, bins, labels = binned
+
+        rows = []
+        for label in labels:
+            index = bins[bins == label].index
+            rows.append(
+                {
+                    "regime": label,
+                    "n_windows": float(len(index)),
+                    "mean_drawdown": float(rolling["drawdown"].reindex(index).mean()),
+                    "mean_correlation": float(rolling["mean_correlation"].reindex(index).mean()),
+                    "effective_bets": float(rolling["effective_bets"].reindex(index).mean()),
+                }
+            )
+        return pd.DataFrame(rows).set_index("regime")
 
     def risk_contributions(self) -> pd.Series:
         """Each sleeve's share of portfolio variance, summing to one.
@@ -389,9 +599,35 @@ class PortfolioResult:
             _mean_off_diagonal(weekly_assets.corr()) if weekly_assets is not None else float("nan")
         )
 
+        # A full-sample bet count is an average over calm and stressed alike.
+        # The rolling view says whether it collapsed when it mattered.
+        rolling = self.rolling_bets()
+        binned = self._drawdown_bins()
+        deep = shallow = stress_z = stress_z_naive = float("nan")
+        if binned is not None:
+            frame, bins, labels = binned
+            if {"deep_drawdown", "shallow_drawdown"} <= set(labels):
+                deep_bets = frame["effective_bets"].reindex(bins[bins == "deep_drawdown"].index)
+                shallow_bets = frame["effective_bets"].reindex(
+                    bins[bins == "shallow_drawdown"].index
+                )
+                deep = float(deep_bets.mean())
+                shallow = float(shallow_bets.mean())
+                stress_z, stress_z_naive = _stress_z(deep_bets, shallow_bets, ROLLING_WINDOW)
+
         merged.update(
             {
                 "n_sleeves": float(len(self.symbols)),
+                "rolling_window": float(ROLLING_WINDOW),
+                "n_rolling_windows": float(len(rolling)),
+                "effective_bets_min": float(rolling["effective_bets"].min())
+                if not rolling.empty
+                else float("nan"),
+                "effective_bets_deep_drawdown": deep,
+                "effective_bets_shallow_drawdown": shallow,
+                "effective_bets_stress_gap": deep - shallow,
+                "effective_bets_stress_z": stress_z,
+                "effective_bets_stress_z_naive": stress_z_naive,
                 "mean_asset_correlation": asset_correlation,
                 "asset_effective_bets": asset_bets,
                 "common_fraction": float(self.common_fraction),

@@ -9,47 +9,75 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Now
 
-- [ ] **Restore GitHub Actions minutes. Not a code item - nobody here can fix
-  it by writing anything.** This repository is private, so Actions minutes are
-  metered, and the included quota is spent. The signature is unmistakable once
-  you know it: *every* workflow - `ci.yml` as much as `daily-prices.yml`, on
-  push, `pull_request` and `schedule` alike - fails after three to five
-  seconds with `runner_id: 0` and no downloadable logs, because no runner was
-  ever assigned. No step ran, so no step can be debugged. Last green run of
-  anything: 2026-09-13.
-
-  Three ways out, all of them the repository owner's to take: raise the
-  spending limit under <https://github.com/settings/billing>, make the
-  repository public (standard runners are unmetered for public repositories),
-  or wait for the monthly reset. Until one of them happens, `make check` is
-  the gate (see below) and `scripts/daily_update.py` is the feed.
-
-  What it is costing, so that the cost is on the record rather than in
-  someone's memory: the journal has been frozen since 2026-09-11 at 15 matured
-  forecasts covering **one** independent horizon. Independent horizons arrive
-  one trading day at a time and cannot be backfilled, because a forecast
-  written today about a day that has already happened is not a forecast. Every
-  day the feed stays down is a day the only untunable number here does not
-  earn.
+- [ ] **Walk-forward hyper-parameter selection.** Promoted from Later on
+  2026-09-23, not because anything about it changed but because the queue
+  ahead of it emptied, and by this file's own ordering rule - how much an item
+  changes what the project can honestly claim - it is now the top of the list.
+  Hyper-parameters are fixed and were chosen while looking at this data.
+  Limitation 1 in `docs/methodology.md` names that as the selection bias no
+  walk-forward can remove; selecting them inside each fold removes one layer
+  of it, and is the only item here that touches limitation 1 at all.
 
 ## Next
 
-- [ ] **Rolling correlation in the portfolio section.** `effective_bets` is a
-  full-sample average, and correlations rise in exactly the drawdowns the
-  diversification was supposed to cushion. A rolling window would show whether
-  the bet count collapses when it matters, the same way `hit_rate_z` over the
-  journal's timeline shows *when* a decay started.
+Nothing queued. The daily routine adds an item here when it finds a gap; an
+empty queue is a real answer, and a day that pushes nothing is a fine outcome.
+
 ## Later
 
 - [ ] **Intraday or weekly bars.** The whole framework assumes daily.
 - [ ] **Borrow costs and short availability.** Shorting is currently free and
   always possible, which it is not - especially for Taiwan small caps.
-- [ ] **Walk-forward hyper-parameter selection.** Hyper-parameters are fixed
-  and were chosen while looking at the data; selecting them inside each fold
-  would remove one layer of selection bias.
 
 ## Done
 
+- [x] **GitHub Actions minutes restored** (2026-09-23, by the repository
+  owner - it was never a code item). The outage ran from 2026-09-13 to
+  2026-09-22: every workflow, on push, `pull_request` and `schedule` alike,
+  died in three to five seconds with `runner_id: 0` and no logs, because no
+  runner was ever assigned. Run #25 of `daily-prices.yml` completed
+  successfully on 2026-09-23 and committed the first new bars in ten days.
+
+  What it cost, recorded here rather than left in someone's memory. The
+  journal sat frozen at 15 matured forecasts covering **one** independent
+  horizon for nine calendar days, and the ten-day hole between the
+  2026-09-11 and 2026-09-21 rows is permanent: independent horizons arrive
+  one trading day at a time and cannot be backfilled, because a forecast
+  written today about a day that has already happened is not a forecast. The
+  journal now stands at 31 matured forecasts over **two** independent
+  horizons - the count that governs every significance claim here, and the
+  one the outage was spending.
+
+  Two things built during the outage are worth keeping now that it is over,
+  because neither was only a workaround: `make check` as the local gate, and
+  `scripts/daily_update.py` as a feed that does not need a runner. Keep both
+  green - the next quota reset is also a future outage.
+- [x] Rolling correlation in the portfolio section
+  (`rolling_effective_bets`, `PortfolioResult.rolling_bets()`,
+  `bets_by_drawdown()`). `effective_bets` was a full-sample average of a
+  quantity bought as insurance, and correlations rise in exactly the
+  drawdowns the diversification was supposed to cushion, so the average
+  describes a state that held in neither half. The bet count is re-measured
+  over a trailing 63-day window and conditioned on the drawdown each window
+  ended in, both causal at their date, split by tercile rather than by a
+  threshold that could be chosen once the answer was visible.
+
+  The part worth flagging, because the first draft got it wrong: the report
+  originally called a gap of 0.08 bets a collapse, which is the exact failure
+  this project exists to avoid. `effective_bets_stress_z` now divides the
+  tercile gap by its own standard error at a window count deflated by the
+  window length - consecutive windows share `window - 1` days, so a tercile
+  holding 129 windows does not hold 129 reads of the market - with
+  `effective_bets_stress_z_naive` beside it, the same bracketing
+  `hit_rate_z` / `hit_rate_z_naive` uses. The report only draws a conclusion
+  at `|z| >= 2` and otherwise says the sample cannot tell, which is not the
+  same as saying there is no problem. On the synthetic screen the deflated z
+  is -0.18 against a naive -1.46: nothing to report, correctly.
+
+  What it does not do: the failure being tested for is a tail event, so a
+  quiet sample not containing it is weak evidence either way, and the minimum
+  of the rolling line is a minimum over heavily overlapping draws and is
+  biased low. Both are stated in the section rather than left for the reader.
 - [x] Time-zone-aware alignment for cross-market correlation, sized by weekly
   returns. Matching a Taipei bar to a New York bar by calendar date splits a
   shared move that crosses midnight across two dates, so the same-day

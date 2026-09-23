@@ -307,3 +307,21 @@ def test_screen_report_survives_a_single_evaluated_symbol(universe, screen_confi
 
     assert "## Held together, not one at a time" in rendered
     assert "nothing here to diversify" in rendered
+
+
+def test_screen_report_asks_whether_the_bet_count_survived_the_drawdowns(
+    universe, screen_config
+) -> None:
+    result = screen_universe(universe, "ridge", screen_config, permutations=0)
+    rendered = render_screen_report(result, screen_config)
+
+    assert "### Did the diversification hold when it mattered?" in rendered
+    assert "deep_drawdown" in rendered
+    assert "shallow_drawdown" in rendered
+    # The gap is always sized before it is described, so noise cannot read as a finding.
+    assert "naive z" in rendered
+    # And the rolling section comes before the weekly one, so the reader has the
+    # pooled count, then its stability, then the frequency caveat on both.
+    assert rendered.index("Did the diversification hold when it mattered?") < rendered.index(
+        "Same day, or same week?"
+    )
