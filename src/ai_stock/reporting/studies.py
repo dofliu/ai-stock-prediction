@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from ai_stock.config import ExperimentConfig
+from ai_stock.evaluation.walkforward import WalkForwardResult
 from ai_stock.journal import ScoreResult
 from ai_stock.pipeline import ModelRun, ScreenResult, SimulationBundle, deflated_sharpe_ratios
 from ai_stock.portfolio import PortfolioResult
@@ -162,6 +163,86 @@ def _caveats() -> list[str]:
     ]
 
 
+def _selection_verdict(stability: pd.DataFrame, spread: float) -> str:
+    """Whether the per-fold hyper-parameter selection found a real difference.
+
+    Phrased around the two ways it can be empty of information - a winner that
+    changes every fold, or a grid whose entries score the same - because both
+    mean the tuning is choosing between candidates the data cannot separate,
+    and neither shows up in the performance table.
+    """
+    share = float(stability["modal_share"].min())
+    if share < 0.5:
+        return (
+            "**The selection is unstable.** The most common winning value holds in under "
+            f"half the folds ({share:.0%} for the least stable parameter), so the grid "
+            "entries are indistinguishable at this sample size. The performance below is "
+            "an honest estimate of this procedure, instability included - it is not "
+            "evidence that any one setting works."
+        )
+    if np.isfinite(spread) and spread < 0.01:
+        return (
+            f"**The candidates barely differ.** Best minus worst mean inner score is {spread:.4f}, "
+            "averaged over folds. A stable winner across a grid this flat is close to "
+            "arbitrary; the selection is costing fits without changing the forecast."
+        )
+    return (
+        f"The winning value holds in at least {share:.0%} of folds, over a best-minus-worst "
+        f"inner spread of {spread:.4f}. That is the most this can say: a stable choice is "
+        "consistent with a real difference between the candidates, and never establishes one."
+    )
+
+
+def _selection_section(report: Report, walk_forward: WalkForwardResult) -> None:
+    """Per-fold hyper-parameter selection, if the run did any."""
+    stability = walk_forward.selection_stability()
+    if stability.empty:
+        return
+
+    report.heading("Hyper-parameters, selected inside each fold")
+    report.text(
+        "Each fold chose these from an inner walk-forward over its own training bars, "
+        "with the same embargo the outer loop uses. Nothing outside the training window "
+        "was read, so the test bars below are still out-of-sample after selection."
+    )
+    report.raw_table(
+        markdown_table(
+            ["parameter", "n_distinct", "modal_value", "modal_share"],
+            [
+                [
+                    str(name),
+                    format_number(row["n_distinct"], digits=0),
+                    str(row["modal_value"]),
+                    format_number(row["modal_share"], percent=True),
+                ]
+                for name, row in stability.iterrows()
+            ],
+        )
+    )
+    report.text(_selection_verdict(stability, walk_forward.selection_spread()))
+
+    chosen = walk_forward.selected_params()
+    if not chosen.empty:
+        report.text("What each fold picked:")
+        report.dataframe(chosen.astype(str))
+
+    report.bullets(
+        [
+            "Fixed hyper-parameters, chosen once on the full sample, report a number no "
+            "live run could have produced - the live run would have had to pick them from "
+            "the past. Selecting inside the fold usually *lowers* the reported performance, "
+            "and that drop is the bias being removed rather than a regression.",
+            "What this does not remove: the grid itself is a human choice made with this "
+            "data in view, as are the feature set and the model list. Limitation 1 in "
+            "`docs/methodology.md` still stands - this closes one layer of it, not the whole.",
+            "The spread quoted above is the gap between the best and worst candidate's mean "
+            "inner score, averaged over folds - one number for the whole grid, since the "
+            "candidates are scored as combinations. Read it beside `modal_share`: a stable "
+            "winner over a flat grid is arbitrary, not robust.",
+        ]
+    )
+
+
 def render_backtest_report(run: ModelRun, config: ExperimentConfig) -> str:
     """Full report for a single model: forecasts, folds, backtest, caveats."""
     walk_forward = run.walk_forward
@@ -229,6 +310,8 @@ def render_backtest_report(run: ModelRun, config: ExperimentConfig) -> str:
             if column in table:
                 table[column] = table[column].dt.date.astype(str)
         report.dataframe(table)
+
+    _selection_section(report, walk_forward)
 
     stability = walk_forward.feature_importance_stability()
     if not stability.empty:

@@ -9,14 +9,7 @@ Keep each item small enough to land in one reviewed pull request.
 
 ## Now
 
-- [ ] **Walk-forward hyper-parameter selection.** Promoted from Later on
-  2026-09-23, not because anything about it changed but because the queue
-  ahead of it emptied, and by this file's own ordering rule - how much an item
-  changes what the project can honestly claim - it is now the top of the list.
-  Hyper-parameters are fixed and were chosen while looking at this data.
-  Limitation 1 in `docs/methodology.md` names that as the selection bias no
-  walk-forward can remove; selecting them inside each fold removes one layer
-  of it, and is the only item here that touches limitation 1 at all.
+Nothing queued. The daily routine adds an item here when it finds a gap.
 
 ## Next
 
@@ -31,6 +24,46 @@ empty queue is a real answer, and a day that pushes nothing is a fine outcome.
 
 ## Done
 
+- [x] **Walk-forward hyper-parameter selection** (`ai_stock.evaluation.tuning`,
+  `run_walk_forward(..., tuning=...)`). Hyper-parameters chosen once on the
+  full sample and then evaluated out-of-sample report a number no live run
+  could have produced: the live run would have had to pick them from the past.
+  Each fold now selects its own from an inner walk-forward over its own
+  training bars, reusing the same `WalkForwardSplitter` so the inner embargo
+  is the same tested code path as the outer one.
+
+  The test that carries the claim scrambles every feature *after* the outer
+  training window and asserts that not one fold's chosen value moves. That is
+  the only thing this feature asserts, and a splitter off by one, an inner
+  fold measured on the pooled calendar, or an embargo applied in the wrong
+  direction would each break it.
+
+  Three choices worth recording. **The selection metric is `ic_pearson`, not
+  Sharpe** - Sharpe reads the cost model, the sizing rule and the leverage cap
+  as well as the forecast, so tuning on it lets a candidate win by suiting the
+  trading configuration, which is the one thing downstream of this a user
+  changes freely. **The inner split is a walk-forward, not a single hold-out**,
+  because a hold-out picks hyper-parameters on one stretch of market - the
+  fragility this project spends its effort measuring elsewhere. **`min_inner_train`
+  is an admitted judgement call**: the schedule arithmetic scales with the
+  window and never reaches a natural break point, so without an explicit floor
+  a 40-bar window splits into a 23-bar training block and reports a winner.
+  Below the floor the defaults are kept and the report says nothing was
+  selected, rather than dressing a coin flip as a choice.
+
+  Read `selection_stability()` before any performance number from a tuned run:
+  a winner that changes every fold, or a `selection_spread` near zero, both
+  mean the candidates are indistinguishable at this sample size, and neither
+  shows up in the performance table. On the synthetic screen `ic_fold_mean`
+  falls from 0.166 fixed to 0.146 tuned - **that drop is the bias being
+  removed, not a regression**, and it is the only reason to do this.
+
+  Off by default, which is itself a limitation and is now stated in
+  limitation 1 rather than left implicit: the fit count multiplies by
+  `len(grid) * n_inner_folds + 1`, so the default run still carries the bias.
+  What no walk-forward can remove, and limitation 1 still says: the grid, the
+  feature set and the model list are human choices made with this data in view.
+  This closes one layer of limitation 1, not the whole.
 - [x] **GitHub Actions minutes restored** (2026-09-23, by the repository
   owner - it was never a code item). The outage ran from 2026-09-13 to
   2026-09-22: every workflow, on push, `pull_request` and `schedule` alike,

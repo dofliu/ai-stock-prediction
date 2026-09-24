@@ -23,6 +23,7 @@ from ai_stock.evaluation.multiple_testing import (
     bonferroni_threshold,
     expected_false_positives,
 )
+from ai_stock.evaluation.tuning import TuningConfig
 from ai_stock.evaluation.walkforward import WalkForwardResult, run_walk_forward
 from ai_stock.features.builder import Dataset, build_dataset
 from ai_stock.portfolio import PortfolioResult, build_portfolio
@@ -98,17 +99,22 @@ def run_model(
     *,
     dataset: Dataset | None = None,
     model_kwargs: dict | None = None,
+    tuning: TuningConfig | None = None,
 ) -> ModelRun:
     """Walk-forward evaluate one model and backtest its pooled forecasts.
 
     Passing a pre-built ``dataset`` avoids recomputing features when several
     models share the same feature configuration.
+
+    ``tuning`` makes every fold select its own hyper-parameters from its own
+    training bars; without it the fixed ones are used, which is the default
+    and the cheaper, less honest answer.
     """
     config = config or ExperimentConfig()
     dataset = dataset if dataset is not None else build_dataset(ohlcv, config.features)
 
     walk_forward = run_walk_forward(
-        dataset, model_name, config.walk_forward, model_kwargs=model_kwargs
+        dataset, model_name, config.walk_forward, model_kwargs=model_kwargs, tuning=tuning
     )
     backtest = run_backtest(walk_forward.close, walk_forward.predictions, config.backtest)
     return ModelRun(name=model_name, walk_forward=walk_forward, backtest=backtest)
