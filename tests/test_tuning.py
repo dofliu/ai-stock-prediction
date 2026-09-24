@@ -239,6 +239,23 @@ def test_the_chosen_value_is_the_best_scoring_candidate(
         assert chosen["score"].iloc[0] == pytest.approx(group["score"].max())
 
 
+def test_a_repeated_grid_value_still_yields_exactly_one_winner(
+    tuned_dataset, tuned_config: WalkForwardConfig
+) -> None:
+    """Two candidates can share a label; only one of them won.
+
+    Marking the winner by label rather than by position is the obvious-looking
+    implementation and it double-marks here.
+    """
+    tuning = TuningConfig(grid={"alpha": [2.0, 2.0, 4.0]}, n_inner_folds=2)
+    result = run_walk_forward(tuned_dataset, AlphaModel, tuned_config, tuning=tuning)
+
+    scores = result.selection_scores()
+    assert not scores.empty
+    for number, group in scores.groupby("fold"):
+        assert group["chosen"].sum() == 1, f"fold {number} marked {group['chosen'].sum()} winners"
+
+
 def test_a_candidate_that_raises_is_scored_rather_than_crashing_the_run(
     tuned_dataset, tuned_config: WalkForwardConfig
 ) -> None:

@@ -585,8 +585,9 @@ def _select_params(
 
     best_params: dict[str, Any] = {}
     best_score = float("nan")
+    best_index = -1
     records: list[dict[str, Any]] = []
-    for params in tuning.candidates():
+    for index, params in enumerate(tuning.candidates()):
         score = _score_candidate(train, inner_folds, factory, params, tuning)
         records.append(
             {
@@ -597,13 +598,13 @@ def _select_params(
             }
         )
         if tuning.better(score, best_score):
-            best_score, best_params = score, params
+            best_score, best_params, best_index = score, params, index
 
-    if not np.isfinite(best_score):
+    if best_index < 0:
         return {}, []
-    label = describe_params(best_params)
-    for record in records:
-        record["chosen"] = record["params"] == label
+    # Marked by position rather than by label: a grid that repeats a value
+    # gives two candidates the same label, and exactly one of them won.
+    records[best_index]["chosen"] = True
     return best_params, records
 
 
