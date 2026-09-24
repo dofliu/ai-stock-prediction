@@ -31,6 +31,14 @@ it: ``step`` below ``test_size`` overlaps the test windows outright, and a
 of outcome. :meth:`WalkForwardResult.independent_folds` counts the fold-widths
 of distinct market the schedule actually reaches, and ``ic_fold_t`` divides by
 that; ``ic_fold_t_naive`` keeps the old per-fold count beside it.
+
+**Hyper-parameters chosen inside the fold.** Passing a
+:class:`~ai_stock.evaluation.tuning.TuningConfig` makes each fold select its
+own hyper-parameters from an inner walk-forward over its *training* bars
+alone, so the reported out-of-sample number describes a procedure a live run
+could actually have followed. See that module for what this does and does not
+remove; :meth:`WalkForwardResult.selection_stability` is the table to read
+first.
 """
 
 from __future__ import annotations
@@ -38,12 +46,14 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from ai_stock.config import WalkForwardConfig
 from ai_stock.evaluation.metrics import classification_metrics, regression_metrics
+from ai_stock.evaluation.tuning import TuningConfig, describe_params, inner_schedule
 from ai_stock.features import indicators as ind
 from ai_stock.features.builder import Dataset
 from ai_stock.models.base import Model
@@ -56,7 +66,13 @@ __all__ = [
     "run_walk_forward",
 ]
 
-ModelFactory = Callable[[], Model]
+ModelFactory = Callable[..., Model]
+"""Builds a fresh model.
+
+Called with no arguments when no tuning is configured, and with the winning
+grid entry as keyword arguments when there is one - so a factory used with
+:class:`~ai_stock.evaluation.tuning.TuningConfig` must accept the grid's keys.
+"""
 
 
 def _covered_window_ratio(starts: np.ndarray, ends: np.ndarray) -> float:
@@ -132,6 +148,10 @@ class FoldResult:
     n_test: int
     predictions: pd.Series
     metrics: dict[str, float]
+    params: dict[str, Any] = field(default_factory=dict)
+    """Hyper-parameters this fold was fitted with; empty when none were selected."""
+    selection: list[dict[str, Any]] = field(default_factory=list)
+    """One record per candidate scored on this fold's inner validation folds."""
 
 
 @dataclass
@@ -181,6 +201,79 @@ class WalkForwardResult:
         cv = std / mean.abs().replace(0.0, np.nan)
         frame = pd.DataFrame({"mean": mean, "std": std, "cv": cv})
         return frame.reindex(mean.abs().sort_values(ascending=False).index)
+
+    def selected_params(self) -> pd.DataFrame:
+        """One row per fold, one column per hyper-parameter that was selected.
+
+        Empty when the run used fixed hyper-parameters, which is the default -
+        report code branches on ``.empty`` the same way it does for the
+        feature-importance and regime tables.
+        """
+        rows = {fold.number: dict(fold.params) for fold in self.folds if fold.params}
+        if not rows:
+            return pd.DataFrame()
+        frame = pd.DataFrame.from_dict(rows, orient="index")
+        frame.index.name = "fold"
+        return frame
+
+    def selection_stability(self) -> pd.DataFrame:
+        """Per hyper-parameter: how often the inner selection changed its mind.
+
+        The table to read before any performance number from a tuned run.
+        ``n_distinct`` is how many different values won across the folds and
+        ``modal_share`` how often the most common one did. A parameter that
+        wins with a different value almost every fold is being selected on
+        noise: the grid entries are indistinguishable at this sample size, and
+        the honest claim becomes "this procedure, instability included, earns
+        this much" rather than "these hyper-parameters work".
+
+        Read it beside :meth:`selection_spread`, which asks the same question
+        from the other direction and is kept separate because it is a property
+        of the whole grid rather than of any one parameter.
+        """
+        params = self.selected_params()
+        if params.empty:
+            return pd.DataFrame()
+        rows = []
+        for name in params.columns:
+            values = params[name]
+            counts = values.astype(str).value_counts()
+            rows.append(
+                {
+                    "parameter": name,
+                    "n_distinct": int(counts.size),
+                    "modal_value": str(counts.index[0]),
+                    "modal_share": float(counts.iloc[0] / len(values)),
+                }
+            )
+        return pd.DataFrame(rows).set_index("parameter")
+
+    def selection_spread(self) -> float:
+        """Best minus worst candidate mean inner score, averaged over folds.
+
+        The size of the difference the selection is choosing between, and
+        therefore how much the choice could possibly be worth. Near zero means
+        the grid is flat: a stable winner over a flat grid is arbitrary rather
+        than robust, which :meth:`selection_stability` on its own cannot say.
+
+        It is one number for the whole grid, not one per parameter - the
+        candidates are scored as combinations, so there is no per-parameter
+        spread to report without attributing a joint difference to one axis.
+        ``NaN`` when no fold scored two candidates finitely.
+        """
+        spreads = []
+        for fold in self.folds:
+            finite = [record["score"] for record in fold.selection if np.isfinite(record["score"])]
+            if len(finite) > 1:
+                spreads.append(max(finite) - min(finite))
+        return float(np.mean(spreads)) if spreads else float("nan")
+
+    def selection_scores(self) -> pd.DataFrame:
+        """Every candidate's mean inner-validation score, one row per fold-candidate."""
+        records = [record for fold in self.folds for record in fold.selection]
+        if not records:
+            return pd.DataFrame()
+        return pd.DataFrame(records)
 
     def independent_folds(self) -> float:
         """How many fold-widths of distinct market the schedule actually reaches.
@@ -420,6 +513,101 @@ def _fit_one_fold(
     return predictions, model.feature_importance()
 
 
+def _score_candidate(
+    train: Dataset,
+    inner_folds: list[Fold],
+    factory: ModelFactory,
+    params: dict[str, Any],
+    tuning: TuningConfig,
+) -> float:
+    """Mean inner-validation score for one candidate, or ``NaN`` if it never fitted.
+
+    A candidate that raises is scored ``NaN`` rather than aborting the run:
+    a grid written by hand will contain combinations some estimator rejects,
+    and :meth:`TuningConfig.better` already refuses to let a non-finite score
+    win. ``ValueError`` is the only exception caught, because that is what
+    :func:`_fit_one_fold` and scikit-learn raise for a rejected parameter -
+    anything else is a bug and should surface.
+    """
+    scores: list[float] = []
+    for inner in inner_folds:
+        try:
+            values, _ = _fit_one_fold(factory(**params), train, inner)
+        except ValueError:
+            return float("nan")
+        test = train.slice(inner.test)
+        predictions = pd.Series(values, index=test.index)
+        metrics = regression_metrics(test.forward_return, predictions)
+        metrics.update(classification_metrics(test.direction, predictions))
+        scores.append(float(metrics.get(tuning.metric, float("nan"))))
+    finite = [value for value in scores if np.isfinite(value)]
+    return float(np.mean(finite)) if finite else float("nan")
+
+
+def _select_params(
+    dataset: Dataset,
+    fold: Fold,
+    factory: ModelFactory,
+    tuning: TuningConfig,
+    embargo: int,
+    horizon: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Choose hyper-parameters from this fold's training bars alone.
+
+    The inner schedule is an ordinary :class:`WalkForwardSplitter` run over
+    the training slice, so the embargo between inner train and inner
+    validation is the same code path the outer loop uses. Nothing outside
+    ``fold.train`` is read, which is what makes the outer test window still
+    out-of-sample after selection.
+
+    Returns the winning parameters and one record per candidate. When the
+    training window is too short for the requested inner schedule, or no
+    candidate scored finitely, the winner is the empty dict - the model's own
+    defaults - and the caller reports that no selection happened rather than
+    inventing one.
+    """
+    train = dataset.slice(fold.train)
+    schedule = inner_schedule(len(train), embargo, tuning)
+    if schedule is None:
+        return {}, []
+
+    train_size, test_size = schedule
+    inner_config = WalkForwardConfig(
+        train_size=train_size,
+        test_size=test_size,
+        step=test_size,
+        expanding=True,
+        embargo=embargo,
+    )
+    inner_folds = list(WalkForwardSplitter(inner_config).split(len(train), horizon))
+    if not inner_folds:
+        return {}, []
+
+    best_params: dict[str, Any] = {}
+    best_score = float("nan")
+    best_index = -1
+    records: list[dict[str, Any]] = []
+    for index, params in enumerate(tuning.candidates()):
+        score = _score_candidate(train, inner_folds, factory, params, tuning)
+        records.append(
+            {
+                "fold": fold.number,
+                "params": describe_params(params),
+                "score": score,
+                "chosen": False,
+            }
+        )
+        if tuning.better(score, best_score):
+            best_score, best_params, best_index = score, params, index
+
+    if best_index < 0:
+        return {}, []
+    # Marked by position rather than by label: a grid that repeats a value
+    # gives two candidates the same label, and exactly one of them won.
+    records[best_index]["chosen"] = True
+    return best_params, records
+
+
 def run_walk_forward(
     dataset: Dataset,
     model_factory: ModelFactory | str,
@@ -427,6 +615,7 @@ def run_walk_forward(
     *,
     model_kwargs: dict | None = None,
     regime_vol_window: int = 20,
+    tuning: TuningConfig | None = None,
 ) -> WalkForwardResult:
     """Run a full walk-forward evaluation and pool the out-of-sample forecasts.
 
@@ -446,6 +635,12 @@ def run_walk_forward(
         :meth:`WalkForwardResult.regime_metrics` bins predictions by. Computed
         on ``dataset.close`` before folding, so it stays causal and free of the
         gaps between test windows.
+    tuning:
+        When set and non-trivial, each fold selects its hyper-parameters from
+        an inner walk-forward over its own training bars instead of using the
+        fixed ones. Multiplies the fit count by
+        ``len(grid) * n_inner_folds + 1``; see
+        :mod:`ai_stock.evaluation.tuning` for what it buys.
 
     Notes
     -----
@@ -459,15 +654,21 @@ def run_walk_forward(
         name = model_factory
         kwargs = model_kwargs or {}
 
-        def factory() -> Model:
-            return create_model(name, **kwargs)
+        def factory(**params: Any) -> Model:
+            return create_model(name, **{**kwargs, **params})
     else:
-        factory = model_factory
+        given = model_factory
+
+        def factory(**params: Any) -> Model:
+            return given(**params) if params else given()
 
     splitter = WalkForwardSplitter(config)
     folds = list(splitter.split(len(dataset), dataset.horizon))
     if not folds:
         raise ValueError("the walk-forward schedule produced no folds")
+
+    select = tuning is not None and tuning.enabled
+    embargo = (config or WalkForwardConfig()).resolved_embargo(dataset.horizon)
 
     probe = factory()
     fold_results: list[FoldResult] = []
@@ -475,7 +676,12 @@ def run_walk_forward(
     importances: list[pd.Series] = []
 
     for fold in folds:
-        model = factory()
+        params, selection = (
+            _select_params(dataset, fold, factory, tuning, embargo, dataset.horizon)
+            if select and tuning is not None
+            else ({}, [])
+        )
+        model = factory(**params)
         values, importance = _fit_one_fold(model, dataset, fold)
 
         test = dataset.slice(fold.test)
@@ -499,6 +705,8 @@ def run_walk_forward(
                 n_test=fold.test_size,
                 predictions=predictions,
                 metrics=metrics,
+                params=params,
+                selection=selection,
             )
         )
 
