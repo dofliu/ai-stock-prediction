@@ -360,3 +360,34 @@ def test_the_report_states_what_was_selected(
 
     untuned = render_backtest_report(run_model(ohlcv, "ridge", config), config)
     assert "Hyper-parameters, selected inside each fold" not in untuned
+
+
+def test_the_report_says_when_only_some_folds_selected(ohlcv: pd.DataFrame) -> None:
+    """A share computed over 4 folds must not read as a share over 6.
+
+    An expanding schedule grows the training window fold by fold, so the
+    inner training block grows with it and ``min_inner_train`` can sit between
+    an early fold's and a later one's. Here fold 0 gets 205 inner training
+    bars and fold 1 gets 275, so a floor of 250 turns away the first and
+    admits the rest.
+    """
+    from dataclasses import replace
+
+    from ai_stock.config import ExperimentConfig
+    from ai_stock.pipeline import run_model
+    from ai_stock.reporting.studies import render_backtest_report
+
+    config = replace(
+        ExperimentConfig(),
+        features=FeatureConfig(horizon=5),
+        walk_forward=WalkForwardConfig(train_size=300, test_size=100),
+    )
+    tuning = TuningConfig(grid={"alpha": [0.1, 10.0]}, n_inner_folds=2, min_inner_train=250)
+    run = run_model(ohlcv, "ridge", config, tuning=tuning)
+
+    n_selected = len(run.walk_forward.selected_params())
+    n_folds = len(run.walk_forward.folds)
+    assert 0 < n_selected < n_folds, "the test is vacuous unless the run is mixed"
+
+    report = render_backtest_report(run, config)
+    assert f"{n_folds - n_selected} of {n_folds} folds selected nothing" in report

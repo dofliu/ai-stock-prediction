@@ -199,12 +199,22 @@ def _selection_section(report: Report, walk_forward: WalkForwardResult) -> None:
     if stability.empty:
         return
 
+    n_selected = len(walk_forward.selected_params())
+    n_folds = len(walk_forward.folds)
+
     report.heading("Hyper-parameters, selected inside each fold")
     report.text(
         "Each fold chose these from an inner walk-forward over its own training bars, "
         "with the same embargo the outer loop uses. Nothing outside the training window "
         "was read, so the test bars below are still out-of-sample after selection."
     )
+    if n_selected < n_folds:
+        report.text(
+            f"**{n_folds - n_selected} of {n_folds} folds selected nothing** and kept the "
+            "model's defaults: their training window was below `min_inner_train`, which is "
+            "where a split would fit on too few bars to mean anything. Every share below is "
+            f"out of the {n_selected} folds that did select, not out of {n_folds}."
+        )
     report.raw_table(
         markdown_table(
             ["parameter", "n_distinct", "modal_value", "modal_share"],
