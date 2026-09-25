@@ -708,31 +708,58 @@ def rolling_compare_with_backtest(
     A single ``hit_rate_z`` over the whole journal answers only whether the
     live record has drifted from the backtest, not when: a bad early stretch
     and a good later one can average out and read as zero. This recomputes the
-    same comparison over the most recent ``window`` matured forecasts, ending
-    at each date in turn, so the point where the gap opened is visible rather
-    than only its current size.
+    same comparison over a trailing window of matured forecasts, ending at each
+    date in turn, so the point where the gap opened is visible rather than only
+    its current size.
 
-    The window counts *matured forecasts*, not calendar days, since a
-    multi-symbol universe records several per day. Returns one row per window
-    end-date with the columns of :func:`compare_with_backtest` plus
-    ``asof_date``; empty (but correctly columned) once fewer than ``window``
-    forecasts have matured.
+    **The window moves one date at a time and keeps whole dates**, so both ends
+    hold a complete cross-section of whatever the universe was that day. The
+    journal records every symbol under one ``asof_date`` and carries no
+    ordering within it - the rows come out in universe order, not in time
+    order - so a window ending part-way through a date would keep an arbitrary
+    subset of that day's symbols. That is not a small effect at this size: with
+    per-symbol live hit rates spanning 0.50 to 0.86, which symbols a cut
+    happened to keep moved the window's hit rate by several points for reasons
+    that had nothing to do with when anything happened, and printed one row per
+    *forecast* under a column headed ``asof_date``, so a four-symbol day became
+    four points on a date axis.
 
-    Note that a window of 30 forecasts over a four-symbol universe spans only
-    about eight trading days, which at a 5-day horizon is two independent
-    blocks. The per-window ``hit_rate_z`` is correspondingly wide and jumpy;
-    it is a picture of *when* the gap moved, not a per-date significance test.
+    ``window`` is therefore a floor on matured forecasts, not an exact count:
+    each window is the shortest run of trailing dates holding at least
+    ``window`` of them, and ``n_scored`` reports what each one actually held.
+    Returns one row per qualifying date with the columns of
+    :func:`compare_with_backtest` plus ``asof_date``; empty (but correctly
+    columned) while fewer than ``window`` forecasts have matured.
+
+    Note that 30 forecasts over a four-symbol universe span only about eight
+    trading days, which at a 5-day horizon is two independent blocks. The
+    per-window ``hit_rate_z`` is correspondingly wide and jumpy; it is a
+    picture of *when* the gap moved, not a per-date significance test.
     """
     frame = live.scored.sort_values("asof_date").reset_index(drop=True)
     if len(frame) < window:
         return pd.DataFrame(columns=list(ROLLING_COMPARISON_COLUMNS))
 
+    # `frame` is sorted by date, so a run of whole dates is a positional slice
+    # and the cumulative counts give its bounds without searching.
+    per_date = frame["asof_date"].value_counts().sort_index()
+    dates = per_date.index
+    cumulative = per_date.to_numpy().cumsum()
+
     empty_pending = frame.iloc[:0].drop(columns=["realised_return", "pnl"])
     rows = []
-    for end in range(window, len(frame) + 1):
-        chunk = frame.iloc[end - window : end]
+    start = 0
+    for end in range(len(dates)):
+        # Drop dates off the front while the rest would still clear the floor.
+        while start < end and cumulative[end] - cumulative[start] >= window:
+            start += 1
+        low = int(cumulative[start - 1]) if start else 0
+        high = int(cumulative[end])
+        if high - low < window:
+            continue
+        chunk = frame.iloc[low:high]
         window_result = ScoreResult(scored=chunk, pending=empty_pending, cost_bps=live.cost_bps)
         comparison = compare_with_backtest(window_result, backtest_metrics)
-        comparison["asof_date"] = chunk["asof_date"].iloc[-1]
+        comparison["asof_date"] = dates[end]
         rows.append(comparison)
     return pd.DataFrame(rows, columns=list(ROLLING_COMPARISON_COLUMNS))

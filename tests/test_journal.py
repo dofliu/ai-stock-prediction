@@ -637,6 +637,82 @@ def test_rolling_comparison_finds_when_a_pooled_z_hides_it() -> None:
     assert pooled["hit_rate_z"] > rolling["hit_rate_z"].iloc[-1]
 
 
+def _fake_multi_symbol_scored(
+    n_dates: int, hits_by_symbol: dict[str, bool], horizon: int = 1
+) -> pd.DataFrame:
+    """One row per symbol per date, laid out the way the journal writes them.
+
+    The journal appends a whole day at a time in universe order and records no
+    time within a day, so rows sharing an ``asof_date`` are ordered by symbol
+    and by nothing else. Every test above uses one symbol, where that ordering
+    cannot matter - which is why it went unnoticed.
+    """
+    stacked = pd.concat(
+        [
+            _fake_scored(n_dates, [hit] * n_dates, horizon=horizon, symbol=symbol)
+            for symbol, hit in hits_by_symbol.items()
+        ],
+        ignore_index=True,
+    )
+    return stacked.sort_values(["asof_date", "symbol"], kind="stable").reset_index(drop=True)
+
+
+def test_a_rolling_window_never_ends_part_way_through_a_date() -> None:
+    """One symbol always right and three always wrong: whole days hit at 0.25.
+
+    Any window holding complete days reads exactly 0.25 whatever its length.
+    A window stepping one forecast at a time ends part-way through a date and
+    keeps an arbitrary subset of that day's symbols - seven or eight of the
+    winner across thirty forecasts, never a quarter of them - so the rate it
+    prints moves for reasons that have nothing to do with when anything
+    happened. This is the whole claim of stepping by date.
+    """
+    scored = _fake_multi_symbol_scored(10, {"AAA": True, "BBB": False, "CCC": False, "DDD": False})
+    result = ScoreResult(scored=scored, pending=scored.iloc[:0], cost_bps=5.0)
+
+    rolling = rolling_compare_with_backtest(result, {"directional_accuracy": 0.5}, window=30)
+
+    assert not rolling.empty
+    assert rolling["live_hit_rate"].tolist() == pytest.approx([0.25] * len(rolling))
+
+
+def test_the_rolling_series_prints_one_row_per_date() -> None:
+    """The column is headed `asof_date`, so a date must appear once.
+
+    Stepping by forecast printed a four-symbol day as four points on a date
+    axis, three of them mid-day windows.
+    """
+    scored = _fake_multi_symbol_scored(10, {"AAA": True, "BBB": False, "CCC": False, "DDD": False})
+    result = ScoreResult(scored=scored, pending=scored.iloc[:0], cost_bps=5.0)
+
+    rolling = rolling_compare_with_backtest(result, {"directional_accuracy": 0.5}, window=30)
+
+    assert rolling["asof_date"].is_unique
+    assert rolling["asof_date"].is_monotonic_increasing
+    # 40 forecasts over 10 dates: eight whole dates are the shortest run that
+    # clears a floor of 30, so the last three dates each end a window.
+    assert list(rolling["asof_date"]) == list(pd.date_range("2024-01-08", periods=3, freq="D"))
+    assert (rolling["n_scored"] == 32.0).all()
+
+
+def test_the_window_shrinks_from_the_front_rather_than_expanding() -> None:
+    """`window` is a floor on one window, not a licence to keep growing.
+
+    Three symbols a day against a floor of 10 makes every window four dates
+    long - twelve forecasts - once four dates exist. A window that only ever
+    grew at the front would be an expanding one, and an expanding window says
+    nothing about *when* a gap opened, which is the only reason this function
+    exists.
+    """
+    scored = _fake_multi_symbol_scored(8, {"AAA": True, "BBB": False, "CCC": True})
+    result = ScoreResult(scored=scored, pending=scored.iloc[:0], cost_bps=5.0)
+
+    rolling = rolling_compare_with_backtest(result, {"directional_accuracy": 0.5}, window=10)
+
+    assert len(rolling) == 8 - 4 + 1
+    assert (rolling["n_scored"] == 12.0).all()
+
+
 # --------------------------------------------------------------------------- #
 # The journal is append-only at the byte level, not just in intent
 # --------------------------------------------------------------------------- #
