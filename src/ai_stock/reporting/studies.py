@@ -1212,12 +1212,20 @@ def render_journal_report(
 
     if rolling is not None and not rolling.empty:
         report.heading("Live vs. backtest over time")
+        held = rolling["n_scored"]
+        span = (
+            f"{int(held.min())}"
+            if held.min() == held.max()
+            else f"{int(held.min())}-{int(held.max())}"
+        )
         report.text(
-            f"`hit_rate_z` over the trailing {int(rolling['n_scored'].iloc[0])} matured "
-            "forecasts, ending at each date shown. A single pooled z-score cannot say "
-            "*when* a gap opened; this can. A window that short spans only a handful of "
-            "non-overlapping horizons, so read the shape of the line rather than whether "
-            "any one point crosses -2."
+            f"`hit_rate_z` over a trailing window of matured forecasts, ending at each date "
+            "shown. A single pooled z-score cannot say *when* a gap opened; this can. The "
+            "window advances one date at a time and keeps whole dates, so it always ends on a "
+            "complete cross-section of that day's universe rather than on an arbitrary subset "
+            f"of its symbols; `n_scored` is what each window actually held ({span}). A window "
+            "that short spans only a handful of non-overlapping horizons, so read the shape of "
+            "the line rather than whether any one point crosses -2."
         )
         dates = pd.to_datetime(rolling["asof_date"]).dt.date.astype(str)
         report.code_block(

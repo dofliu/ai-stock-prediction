@@ -24,6 +24,35 @@ empty queue is a real answer, and a day that pushes nothing is a fine outcome.
 
 ## Done
 
+- [x] **Step the live-vs-backtest rolling window by date, not by forecast row**
+  (`rolling_compare_with_backtest`, 2026-09-25). A defect found while reading
+  the day's journal report, not from the queue - the queue was empty.
+
+  The window advanced one matured forecast at a time while the table and the
+  chart were keyed on `asof_date`, so a four-symbol day became four rows under
+  one date and three of them ended part-way through that day's cross-section.
+  The journal records every symbol under one `asof_date` and carries no
+  ordering within it - rows come out in universe order, not in time order - so
+  a mid-day cut kept an arbitrary subset of the symbols. With per-symbol live
+  hit rates currently spanning 0.50 to 0.86, that moved a window's hit rate by
+  several points for reasons with nothing to do with when anything happened.
+
+  The 2026-09-25 report showed it in its mildest form and still showed it: two
+  rows both dated 2026-09-11, both reading 0.5667, when the pooled hit rate
+  over the same matured forecasts was 0.5806. A series meant to say *when* a
+  gap opened was disagreeing with the number it was meant to decompose. It now
+  prints one row per date, 0.5806, which is the pooled figure because the whole
+  matured journal is currently one window.
+
+  `window` is now a floor rather than an exact count: each window is the
+  shortest run of trailing whole dates holding at least `window` matured
+  forecasts, so `n_scored` varies and the report prints its range instead of
+  asserting a fixed one. The carrying test makes one symbol always right and
+  three always wrong, so every whole-day window hits at exactly 0.25 and no
+  mid-day one can; the other two pin that dates are unique and that the window
+  shrinks from the front rather than quietly becoming an expanding window.
+  Every existing test used a single symbol, where the row order within a date
+  cannot matter - which is why this went unnoticed.
 - [x] **Walk-forward hyper-parameter selection** (`ai_stock.evaluation.tuning`,
   `run_walk_forward(..., tuning=...)`). Hyper-parameters chosen once on the
   full sample and then evaluated out-of-sample report a number no live run
