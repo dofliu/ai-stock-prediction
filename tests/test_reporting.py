@@ -25,6 +25,8 @@ from ai_stock.reporting.report import (
     sparkline,
 )
 from ai_stock.reporting.studies import (
+    IN_FLIGHT_ROW_BUDGET,
+    in_flight_table,
     render_backtest_report,
     render_comparison_report,
     render_journal_report,
@@ -286,3 +288,112 @@ def test_journal_report_omits_freshness_when_not_supplied() -> None:
     rendered = render_journal_report(live, ExperimentConfig(), model_name="manual")
 
     assert "Data freshness" not in rendered
+
+
+def _pending(dates: list[str], symbols: list[str]) -> pd.DataFrame:
+    """An open book shaped the way `score_journal` hands one over.
+
+    Sorted by symbol first, which is the ordering that made a row-count slice
+    drop part of a date rather than a whole one.
+    """
+    rows = [
+        {
+            "asof_date": pd.Timestamp(date),
+            "symbol": symbol,
+            "model": "manual",
+            "horizon": 5,
+            "signal": 0.001,
+            "position": 1.0,
+            "close": 100.0,
+            "turnover": 0.0,
+            "cost": 0.0,
+        }
+        for symbol in symbols
+        for date in dates
+    ]
+    return pd.DataFrame(rows).sort_values(["symbol", "model", "asof_date"]).reset_index(drop=True)
+
+
+def test_in_flight_table_holds_every_open_forecast_of_an_ordinary_universe() -> None:
+    """The table and the pending count above it must describe the same book.
+
+    Four symbols at a five-day horizon is the smallest realistic run this
+    project has, and its open book already overran the old twelve-row slice:
+    the report said thirteen in flight and printed twelve, with no note that
+    anything was left out.
+    """
+    pending = _pending(["2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24"], list("ABCD"))
+
+    table, omitted = in_flight_table(pending)
+
+    assert omitted == 0
+    assert len(table) == len(pending)
+
+
+def test_in_flight_table_cuts_between_dates_not_through_a_cross_section() -> None:
+    """A date is shown whole or not at all.
+
+    `pending` arrives in symbol order, so a slice of rows keeps an arbitrary
+    subset of the last date's symbols - a cross-section that looks complete
+    and is not. Budget 5 over three four-symbol dates can hold one date.
+    """
+    pending = _pending(["2026-09-21", "2026-09-22", "2026-09-23"], list("ABCD"))
+
+    table, omitted = in_flight_table(pending, budget=5)
+
+    assert list(table["asof_date"]) == ["2026-09-21"] * 4
+    assert sorted(table["symbol"]) == list("ABCD")
+    assert omitted == 8
+
+
+def test_in_flight_table_keeps_the_oldest_date_even_when_it_alone_overruns() -> None:
+    """Overrunning the budget beats printing a date with symbols missing.
+
+    The budget is a readability limit, not a correctness one, so the one case
+    where the two conflict resolves in favour of the complete cross-section.
+    """
+    pending = _pending(["2026-09-21", "2026-09-22"], list("ABCD"))
+
+    table, omitted = in_flight_table(pending, budget=2)
+
+    assert len(table) == 4
+    assert set(table["asof_date"]) == {"2026-09-21"}
+    assert omitted == 4
+
+
+def test_in_flight_table_is_ordered_oldest_first() -> None:
+    """The next forecast to mature is the first row, not buried by symbol."""
+    pending = _pending(["2026-09-24", "2026-09-21"], ["B", "A"])
+
+    table, _ = in_flight_table(pending)
+
+    assert list(table["asof_date"]) == ["2026-09-21", "2026-09-21", "2026-09-24", "2026-09-24"]
+
+
+def test_the_report_says_when_in_flight_rows_are_left_out() -> None:
+    """Silent truncation is the defect; truncating and saying so is not."""
+    live = _journal_result(40, hits=22, horizon=5)
+    wide = _pending(
+        [f"2026-09-{day:02d}" for day in range(1, 16)],
+        [f"S{i:02d}" for i in range(4)],
+    )
+    live = ScoreResult(scored=live.scored, pending=wide, cost_bps=5.0)
+
+    rendered = render_journal_report(live, ExperimentConfig(), model_name="manual")
+
+    assert "in-flight forecast(s) are not shown" in rendered
+    assert str(IN_FLIGHT_ROW_BUDGET) in rendered
+
+
+def test_the_report_does_not_claim_an_omission_it_did_not_make() -> None:
+    live = _journal_result(40, hits=22, horizon=5)
+    live = ScoreResult(
+        scored=live.scored,
+        pending=_pending(["2026-09-23", "2026-09-24"], ["AAA", "BBB"]),
+        cost_bps=5.0,
+    )
+
+    rendered = render_journal_report(live, ExperimentConfig(), model_name="manual")
+
+    assert "## In flight" in rendered
+    assert "are not shown" not in rendered
