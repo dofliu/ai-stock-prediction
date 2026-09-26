@@ -25,6 +25,8 @@ from ai_stock.reporting.report import (
 )
 
 __all__ = [
+    "IN_FLIGHT_ROW_BUDGET",
+    "in_flight_table",
     "render_backtest_report",
     "render_journal_report",
     "render_comparison_report",
@@ -1057,6 +1059,61 @@ def _decay_verdict(comparison: dict[str, float]) -> str:
     )
 
 
+IN_FLIGHT_ROW_BUDGET = 40
+"""Rows the in-flight table may print before it starts leaving dates out.
+
+At steady state the open book holds roughly ``n_symbols * horizon`` forecasts,
+so this binds only on a universe wide enough that the table would stop being
+readable anyway.
+"""
+
+
+def in_flight_table(
+    pending: pd.DataFrame, *, budget: int = IN_FLIGHT_ROW_BUDGET
+) -> tuple[pd.DataFrame, int]:
+    """The open book in date order, cut only on whole dates.
+
+    Returns the rows to print and how many in-flight forecasts they leave out,
+    so the caller can say so rather than let the table quietly disagree with
+    the pending count printed above it.
+
+    ``pending`` arrives sorted by symbol, so taking a slice of rows drops an
+    arbitrary subset of one date's cross-section - the same defect the rolling
+    comparison window carried. The cut is therefore made between dates: a date
+    is shown whole or not at all, even when showing it whole overruns
+    ``budget``, because the alternative is a date that looks complete and is
+    not.
+
+    >>> frame = pd.DataFrame(
+    ...     {
+    ...         "asof_date": ["2026-01-02", "2026-01-01", "2026-01-02"],
+    ...         "symbol": ["BBB", "AAA", "AAA"],
+    ...         "position": [1.0, -1.0, 1.0],
+    ...     }
+    ... )
+    >>> table, omitted = in_flight_table(frame, budget=2)
+    >>> list(table["asof_date"]), omitted
+    (['2026-01-01'], 2)
+    """
+    columns = [c for c in ("asof_date", "symbol", "signal", "position") if c in pending]
+    table = pending[columns].copy()
+    if "asof_date" not in table:
+        return table.head(budget).reset_index(drop=True), max(len(table) - budget, 0)
+
+    table["asof_date"] = pd.to_datetime(table["asof_date"])
+    table = table.sort_values(["asof_date", "symbol"], kind="stable").reset_index(drop=True)
+
+    kept = 0
+    for size in table.groupby("asof_date", sort=True).size():
+        if kept and kept + size > budget:
+            break
+        kept += int(size)
+
+    shown = table.head(kept).copy()
+    shown["asof_date"] = shown["asof_date"].dt.date.astype(str)
+    return shown.reset_index(drop=True), len(table) - kept
+
+
 def render_journal_report(
     live: ScoreResult,
     config: ExperimentConfig,
@@ -1254,11 +1311,24 @@ def render_journal_report(
 
     if not live.pending.empty:
         report.heading("In flight")
-        columns = [c for c in ("asof_date", "symbol", "signal", "position") if c in live.pending]
-        upcoming = live.pending[columns].tail(12).copy()
-        if "asof_date" in upcoming:
-            upcoming["asof_date"] = pd.to_datetime(upcoming["asof_date"]).dt.date.astype(str)
-        report.dataframe(upcoming.reset_index(drop=True), index=False)
+        upcoming, omitted = in_flight_table(live.pending)
+        report.dataframe(upcoming, index=False)
+        report.bullets(
+            [
+                "Ordered oldest first, which is the order these mature in: the top row is "
+                "the next one to be scored.",
+                *(
+                    [
+                        f"{omitted} later in-flight forecast(s) are not shown - the table "
+                        f"holds the oldest whole dates that fit in {IN_FLIGHT_ROW_BUDGET} "
+                        "rows. It is cut on a date boundary rather than on a row count, so "
+                        "no date appears here with only some of its symbols."
+                    ]
+                    if omitted
+                    else []
+                ),
+            ]
+        )
 
     report.heading("How to read this").bullets(
         [

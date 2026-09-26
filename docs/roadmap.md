@@ -24,6 +24,36 @@ empty queue is a real answer, and a day that pushes nothing is a fine outcome.
 
 ## Done
 
+- [x] **Show the whole open book in the journal's "In flight" table**
+  (`in_flight_table`, 2026-09-26). A defect found while reading the day's
+  journal report, not from the queue - the queue was empty.
+
+  The section printed `live.pending.tail(12)`. `score_journal` sorts pending
+  by `symbol` first, so a twelve-row slice does not keep the twelve most
+  recent forecasts - it keeps the last twelve in *symbol* order, and drops the
+  alphabetically first symbol's open positions. At the steady state of the
+  current universe, four symbols at a five-day horizon, the open book holds
+  sixteen forecasts and the table silently dropped one symbol entirely: a
+  reader would have seen a four-symbol strategy with three symbols in flight.
+
+  The 2026-09-26 report showed it in its mildest form and still showed it. It
+  said "Still in flight (horizon not elapsed): 13" and printed twelve rows,
+  omitting `2026-09-22 2337.TW` - the oldest open forecast, the next one due
+  to be scored - with no note that anything had been left out.
+
+  This is the same defect the rolling window carried a day earlier, so it
+  takes the same answer: cut between whole dates, never through a date's
+  cross-section, and say what was left out. The table is now ordered oldest
+  first, which is the order these mature in, and `IN_FLIGHT_ROW_BUDGET` is a
+  readability limit rather than a correctness one - a single date is printed
+  whole even when it alone overruns the budget, because a date that looks
+  complete and is not is worse than a long table. Nothing truncates at the
+  current universe size; the budget binds only on a universe wide enough that
+  the table would stop being readable anyway.
+
+  No existing test touched this section at all, which is why it went
+  unnoticed - every journal report test used a single symbol, where the row
+  order within a date cannot matter.
 - [x] **Step the live-vs-backtest rolling window by date, not by forecast row**
   (`rolling_compare_with_backtest`, 2026-09-25). A defect found while reading
   the day's journal report, not from the queue - the queue was empty.
