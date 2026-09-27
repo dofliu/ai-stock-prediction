@@ -458,15 +458,24 @@ def _age_label(age_days: float) -> str:
 
 
 def _freshness_line(freshness: pd.DataFrame) -> str:
-    """One line on how current the prices are, flagged when any symbol is behind."""
+    """One line on how current the prices are, flagged when any symbol is behind.
+
+    The in-between case is said out loud rather than left to the report: one
+    missed session is under the threshold, but a run that prints a bare date
+    while a weekday close is unaccounted for is the same quiet failure the
+    threshold exists to catch, one day earlier.
+    """
     if freshness.empty:
         return "no symbols loaded"
     readable = freshness["last_bar"].dropna()
     stamp = str(readable.max()) if not readable.empty else "unknown"
     behind = sorted(freshness.index[freshness["stale"]])
-    if not behind:
-        return stamp
-    return f"{stamp}  (STALE: {', '.join(map(str, behind))} - check the downloader)"
+    if behind:
+        return f"{stamp}  (STALE: {', '.join(map(str, behind))} - check the downloader)"
+    missed = pd.to_numeric(freshness["missed_sessions"], errors="coerce").max()
+    if pd.notna(missed) and missed > 0:
+        return f"{stamp}  ({int(missed)} weekday session(s) missing, under the threshold)"
+    return stamp
 
 
 # --------------------------------------------------------------------------- #

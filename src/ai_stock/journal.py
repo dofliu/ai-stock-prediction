@@ -339,12 +339,24 @@ MIN_TRAIN_ROWS = 250
 """Labelled bars a symbol needs before its forecast is worth recording."""
 
 STALE_AFTER_DAYS = 4
-"""Calendar days after which a price feed is reported as behind.
+"""Calendar days after which :func:`stale_symbols` is asked to report a feed.
 
-Four spans a Friday close read on the following Tuesday, so an ordinary
-weekend never trips it. Anything longer is either a market holiday or a
-broken feed, and this module cannot tell those apart - see
-:func:`data_freshness` for why it reports both the same way.
+Only the default for the ``journal --fail-if-stale`` bare flag, which counts
+calendar days because it backs an exit code and has to clear a market holiday
+without crying wolf - see :func:`stale_symbols`. The *report's* verdict is not
+this: it counts missed weekday sessions, for the reason
+:data:`MISSED_SESSIONS_ALLOWED` gives.
+"""
+
+MISSED_SESSIONS_ALLOWED = 1
+"""Weekday sessions that may be missing before a feed is reported as behind.
+
+One is ordinary. The download runs shortly after a close and a provider
+publishes a day's bar with its own lag, so a symbol routinely arrives one
+session behind its peers - on 2026-09-25 `MU` did exactly that while the three
+Taiwan symbols were current. Two is not that: two closes have come and gone
+with nothing written, which is a feed that has stopped rather than one that is
+slow.
 """
 
 
@@ -364,13 +376,32 @@ def _last_bar_date(frame: pd.DataFrame | None) -> pd.Timestamp | None:
     return pd.Timestamp(index.max()).normalize()
 
 
+def _missed_sessions(last_bar: pd.Timestamp, reference: pd.Timestamp) -> float:
+    """Weekdays strictly between ``last_bar`` and ``reference``.
+
+    Both ends are excluded on purpose. ``last_bar`` has arrived, and
+    ``reference`` is today, whose own session has not closed yet at the hour
+    this runs - counting either would make a healthy feed look behind every
+    single day.
+
+    Mon-Fri, with no holiday calendar: both markets in the current universe
+    trade weekdays, and a closure therefore reads as a missed session. That is
+    the same direction :func:`data_freshness` already errs in.
+    """
+    start = last_bar + pd.Timedelta(days=1)
+    end = reference - pd.Timedelta(days=1)
+    if end < start:
+        return 0.0
+    return float(len(pd.bdate_range(start, end)))
+
+
 def data_freshness(
     universe: dict[str, pd.DataFrame],
     *,
     asof: pd.Timestamp | None = None,
-    stale_after_days: int = STALE_AFTER_DAYS,
+    allow_missed_sessions: int = MISSED_SESSIONS_ALLOWED,
 ) -> pd.DataFrame:
-    """How old each symbol's most recent bar is, relative to ``asof``.
+    """How far behind each symbol's most recent bar is, relative to ``asof``.
 
     Every other number in this module describes a model. This one describes the
     data underneath it, and the two fail in opposite directions. When a price
@@ -381,15 +412,28 @@ def data_freshness(
     healthy. A hit rate that has not moved for a week looks identical whether
     the strategy is quiet or the downloader is dead.
 
-    ``age_days`` is calendar days, not trading days, so a long market holiday
-    is reported as stale. That is the deliberate direction to err in: a
-    spurious "check the feed" costs a glance, and a silently stale hit rate
-    costs the only number in this project that cannot be tuned after the fact.
-    Reading it requires knowing the market's calendar, which this frame does
-    not claim to - it reports the gap and names it, rather than deciding.
+    Two measures, and only one of them decides. ``age_days`` is calendar days,
+    reported because it is what a reader wants to see. ``missed_sessions`` is
+    the number of weekdays that have closed since the last bar, and it is what
+    ``stale`` reads, because a calendar-day age means a different thing on
+    every weekday: three days old is a healthy Monday reading a Friday bar and
+    a symptom on a Wednesday. A single threshold over a quantity whose healthy
+    value moves with the day of week has to be loose enough for the loosest day
+    and is therefore blind on the rest - it will call a Thursday bar read on a
+    Sunday "current" while Friday's session is missing from every symbol, and
+    let a feed that stopped on a Tuesday run three more trading days before it
+    says anything. ``missed_sessions`` has the same healthy value, zero, every
+    day of the week.
+
+    No holiday calendar is consulted, so a market closure reads as a missed
+    session. That is the deliberate direction to err in: a spurious "check the
+    feed" costs a glance, and a silently stale hit rate costs the only number
+    in this project that cannot be tuned after the fact. Reading the difference
+    requires knowing each market's calendar, which this frame does not claim
+    to - it reports the gap and names it, rather than deciding.
 
     Symbols whose frame is empty or carries no usable dates are reported with a
-    missing (``NaN``) ``last_bar`` and an infinite age, because an unreadable
+    missing (``NaN``) ``last_bar`` and infinite counts, because an unreadable
     feed is not a fresh one.
 
     >>> import pandas as pd
@@ -402,10 +446,20 @@ def data_freshness(
     '2026-01-06'
     >>> float(frame.loc["X", "age_days"])
     7.0
+    >>> float(frame.loc["X", "missed_sessions"])  # 7th to 12th, weekdays only
+    4.0
     >>> bool(frame.loc["X", "stale"])
     True
+
+    A Friday bar read on the following Monday is not a feed that stopped, and
+    the weekend does not count against it:
+
+    >>> friday = pd.DataFrame({"close": [1.0]}, index=pd.to_datetime(["2026-01-09"]))
+    >>> monday = data_freshness({"X": friday}, asof=pd.Timestamp("2026-01-12"))
+    >>> float(monday.loc["X", "age_days"]), float(monday.loc["X", "missed_sessions"])
+    (3.0, 0.0)
     """
-    columns = ["symbol", "last_bar", "age_days", "stale"]
+    columns = ["symbol", "last_bar", "age_days", "missed_sessions", "stale"]
     if not universe:
         return pd.DataFrame(columns=columns).set_index("symbol")
 
@@ -416,20 +470,26 @@ def data_freshness(
         last_bar = _last_bar_date(universe[symbol])
         if last_bar is None:
             rows.append(
-                {"symbol": symbol, "last_bar": None, "age_days": float("inf"), "stale": True}
+                {
+                    "symbol": symbol,
+                    "last_bar": None,
+                    "age_days": float("inf"),
+                    "missed_sessions": float("inf"),
+                    "stale": True,
+                }
             )
             continue
-        age = float((reference - last_bar).days)
+        missed = _missed_sessions(last_bar, reference)
         rows.append(
             {
                 "symbol": symbol,
                 "last_bar": last_bar.date().isoformat(),
-                "age_days": age,
-                "stale": age > stale_after_days,
+                "age_days": float((reference - last_bar).days),
+                "missed_sessions": missed,
+                "stale": missed > float(allow_missed_sessions),
             }
         )
     frame = pd.DataFrame(rows, columns=columns).set_index("symbol")
-    frame["stale"] = frame["stale"].astype(bool)
     return frame
 
 
@@ -440,13 +500,16 @@ def stale_symbols(freshness: pd.DataFrame, *, older_than_days: float) -> list[st
     ``stale`` column, so the caller can ask a *different* question from the one
     :func:`data_freshness` answered. The two have different costs of being
     wrong. The ``stale`` column is read by a person glancing at a report, where
-    a needless "check the feed" costs a glance, so it fires early
-    (:data:`STALE_AFTER_DAYS`, four days). This function backs an exit code,
-    which fires a build failure that someone has to triage, and an alarm that
-    cries wolf every Lunar New Year - when the Taiwan market is legitimately
-    shut for up to nine calendar days - is an alarm that gets muted. Callers
-    wiring up an alarm should pass a threshold wide enough to clear the longest
-    holiday in their universe's calendars.
+    a needless "check the feed" costs a glance, so it fires early - after one
+    missed weekday session, which on an ordinary week is the day after next.
+    This function backs an exit code, which fires a build failure that someone
+    has to triage, and an alarm that cries wolf every Lunar New Year - when the
+    Taiwan market is legitimately shut for up to nine calendar days - is an
+    alarm that gets muted. It counts calendar days for that reason: a holiday
+    is not a missed session to anyone triaging a red build, and a threshold in
+    calendar days is the one a reader can check against a holiday calendar
+    directly. Callers wiring up an alarm should pass a threshold wide enough to
+    clear the longest holiday in their universe's calendars.
 
     Symbols whose feed could not be read carry an infinite ``age_days`` and so
     are reported at every threshold, which is the intended reading: an
@@ -458,7 +521,7 @@ def stale_symbols(freshness: pd.DataFrame, *, older_than_days: float) -> list[st
     ...     index=pd.to_datetime(["2026-01-05", "2026-01-06"]),
     ... )
     >>> frame = data_freshness({"X": bars}, asof=pd.Timestamp("2026-01-13"))
-    >>> bool(frame.loc["X", "stale"])  # the report says behind, at four days
+    >>> bool(frame.loc["X", "stale"])  # the report says behind, at four sessions
     True
     >>> stale_symbols(frame, older_than_days=4)
     ['X']

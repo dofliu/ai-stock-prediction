@@ -981,11 +981,26 @@ verdict would be describing its own noise.
 
 
 def _freshness_verdict(freshness: pd.DataFrame) -> str:
-    """State whether the prices under this report are current."""
+    """State whether the prices under this report are current.
+
+    Three states, not two. A feed that has stopped looks exactly like a
+    provider that is one session slow on the first day, so "current" is
+    reserved for the case where nothing at all is missing and the in-between
+    case is described rather than waved through.
+    """
     stale = freshness[freshness["stale"]]
     if stale.empty:
-        newest = freshness["age_days"].min()
-        return f"Prices are current: every symbol's last bar is {int(newest)} day(s) old."
+        missed = float(freshness["missed_sessions"].max())
+        newest = int(freshness["age_days"].min())
+        if missed <= 0:
+            return f"Prices are current: every symbol's last bar is {newest} day(s) old."
+        return (
+            f"Prices are within tolerance but not complete: {int(missed)} weekday "
+            "session(s) have closed since the last bar of at least one symbol. One "
+            "missed session is ordinary - a provider publishes a day's bar with its "
+            "own lag - and is not an alarm here, but it is not *current* either, and "
+            "a feed that has stopped reads exactly like this on its first day."
+        )
 
     unreadable = sorted(stale.index[~np.isfinite(stale["age_days"])])
     behind = stale[np.isfinite(stale["age_days"])]
@@ -1163,12 +1178,15 @@ def render_journal_report(
     if freshness is not None and not freshness.empty:
         report.heading("Data freshness")
         report.table(
-            ["symbol", "last bar", "age (days)", "behind?"],
+            ["symbol", "last bar", "age (days)", "sessions missed", "behind?"],
             [
                 [
                     str(symbol),
                     "-" if pd.isna(row["last_bar"]) else str(row["last_bar"]),
                     "-" if not np.isfinite(row["age_days"]) else f"{row['age_days']:.0f}",
+                    "-"
+                    if not np.isfinite(row["missed_sessions"])
+                    else f"{row['missed_sessions']:.0f}",
                     "yes" if row["stale"] else "no",
                 ]
                 for symbol, row in freshness.iterrows()
@@ -1176,10 +1194,16 @@ def render_journal_report(
         )
         report.bullets(
             [
-                "`age (days)` is calendar days from the symbol's last bar to today, so a "
-                "long market holiday reads as behind. That is the cheap direction to be "
-                "wrong in: a needless glance at the feed costs nothing, a hit rate that "
-                "quietly stopped moving costs the only untunable number here.",
+                "`sessions missed` is the weekdays that have closed since the symbol's "
+                "last bar, and it is what `behind?` reads. `age (days)` is calendar days "
+                "and is shown because it is what a reader wants to see, but it cannot "
+                "carry the verdict: three days old is a healthy Monday reading a Friday "
+                "bar and two missing sessions on a Wednesday, so one threshold over it "
+                "has to be loose enough for the loosest weekday and is blind on the rest.",
+                "No holiday calendar is consulted, so a long market holiday reads as "
+                "sessions missed. That is the cheap direction to be wrong in: a needless "
+                "glance at the feed costs nothing, a hit rate that quietly stopped moving "
+                "costs the only untunable number here.",
                 "A stopped feed does not make this report go quiet - it makes it repeat. "
                 "The same forecasts mature against the same bars and the same hit rate "
                 "comes back, which is why the age is stated before the performance.",

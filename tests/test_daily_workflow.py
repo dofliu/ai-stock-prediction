@@ -42,13 +42,14 @@ def test_the_journal_step_asks_for_the_stale_feed_alarm(workflow: str) -> None:
     assert "--fail-if-stale" in workflow
 
 
-def test_the_stale_alarm_is_wider_than_the_report_threshold(workflow: str) -> None:
+def test_the_stale_alarm_is_wider_than_the_bare_flag_default(workflow: str) -> None:
     """A build alarm that cries wolf every Lunar New Year is one nobody reads.
 
-    The report flags a feed at four days, where a needless glance costs a
-    glance. This exit fails a build, and the Taiwan market shuts for up to nine
-    calendar days in February, so the workflow must pass its own wider figure
-    rather than accepting the bare flag's default.
+    The bare flag defaults to four calendar days, which suits a person glancing
+    at output, where a needless glance costs a glance. This exit fails a build,
+    and the Taiwan market shuts for up to nine calendar days in February, so
+    the workflow must pass its own wider figure rather than accepting that
+    default.
     """
     from ai_stock.journal import STALE_AFTER_DAYS
 

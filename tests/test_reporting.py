@@ -282,6 +282,30 @@ def test_journal_report_states_freshness_even_when_current() -> None:
     assert "The price data is not current" not in rendered
 
 
+def test_journal_report_does_not_call_a_missing_session_current() -> None:
+    """2026-09-27, the report that prompted this: Friday's bar never arrived.
+
+    Every symbol's last bar was Thursday 2026-09-24 and the Sunday report
+    opened with "Prices are current" - three calendar days, inside the
+    four-day threshold the verdict used to read, while a weekday close was
+    unaccounted for across the whole universe. One missed session is under the
+    alarm and stays under it; being silent about it is the part that was wrong,
+    because a feed that has stopped reads exactly like this on its first day.
+    """
+    live = _journal_result(40, hits=22, horizon=5)
+    bars = pd.DataFrame({"close": [1.0, 2.0]}, index=pd.to_datetime(["2026-09-23", "2026-09-24"]))
+    freshness = data_freshness({"MU": bars}, asof=pd.Timestamp("2026-09-27"))
+
+    rendered = render_journal_report(
+        live, ExperimentConfig(), model_name="manual", freshness=freshness
+    )
+
+    assert not freshness.loc["MU", "stale"]
+    assert "Prices are current" not in rendered
+    assert "The price data is not current" not in rendered
+    assert "1 weekday session(s) have closed" in rendered
+
+
 def test_journal_report_omits_freshness_when_not_supplied() -> None:
     live = _journal_result(40, hits=22, horizon=5)
 

@@ -820,7 +820,8 @@ def test_data_freshness_reports_age_and_last_bar() -> None:
     assert list(frame.index) == ["AAA"]
     assert frame.loc["AAA", "last_bar"] == "2026-01-06"
     assert frame.loc["AAA", "age_days"] == pytest.approx(3.0)
-    assert not frame.loc["AAA", "stale"]
+    assert frame.loc["AAA", "missed_sessions"] == pytest.approx(2.0)
+    assert frame.loc["AAA", "stale"]
 
 
 def test_data_freshness_flags_a_feed_that_stopped() -> None:
@@ -830,6 +831,7 @@ def test_data_freshness_flags_a_feed_that_stopped() -> None:
     frame = data_freshness(universe, asof=pd.Timestamp("2026-01-20"))
 
     assert frame.loc["AAA", "age_days"] == pytest.approx(14.0)
+    assert frame.loc["AAA", "missed_sessions"] == pytest.approx(9.0)
     assert frame.loc["AAA", "stale"]
 
 
@@ -840,8 +842,80 @@ def test_data_freshness_tolerates_an_ordinary_weekend() -> None:
     monday = data_freshness({"AAA": friday}, asof=pd.Timestamp("2026-01-12"))
     tuesday = data_freshness({"AAA": friday}, asof=pd.Timestamp("2026-01-13"))
 
+    assert monday.loc["AAA", "missed_sessions"] == pytest.approx(0.0)
+    # By Tuesday, Monday's close is genuinely unaccounted for - but one session
+    # of lag is what a provider routinely costs, so it is not yet an alarm.
+    assert tuesday.loc["AAA", "missed_sessions"] == pytest.approx(1.0)
     assert not monday.loc["AAA", "stale"]
     assert not tuesday.loc["AAA", "stale"]
+
+
+def test_the_same_age_means_different_things_on_different_weekdays() -> None:
+    """The property the whole measure exists for, stated on one pair directly.
+
+    A Friday bar read on the following Monday is three calendar days old and
+    nothing has been missed. A Monday bar read on the Thursday is the *same*
+    three days, and two closes have come and gone. `age_days` cannot separate
+    those two readings, which is why the verdict hangs off `missed_sessions`
+    instead: a threshold over a quantity whose healthy value moves with the day
+    of week has to be loose enough for the loosest day, and is blind on the
+    rest.
+    """
+    friday_bar = _bars(["2026-01-09"])
+    monday_bar = _bars(["2026-01-12"])
+
+    healthy = data_freshness({"AAA": friday_bar}, asof=pd.Timestamp("2026-01-12"))
+    stopped = data_freshness({"AAA": monday_bar}, asof=pd.Timestamp("2026-01-15"))
+
+    assert healthy.loc["AAA", "age_days"] == pytest.approx(stopped.loc["AAA", "age_days"])
+    assert healthy.loc["AAA", "missed_sessions"] == pytest.approx(0.0)
+    assert stopped.loc["AAA", "missed_sessions"] == pytest.approx(2.0)
+    assert not healthy.loc["AAA", "stale"]
+    assert stopped.loc["AAA", "stale"]
+
+
+def test_data_freshness_sees_a_single_dropped_session_over_a_weekend() -> None:
+    """2026-09-27, the report that prompted this: Friday's bar never arrived.
+
+    Every symbol's last bar was Thursday 2026-09-24 and the Sunday report said
+    "Prices are current" - three calendar days, inside a four-day threshold,
+    while a weekday close was unaccounted for across the whole universe. Under
+    the threshold is the right verdict for one session; silent is not.
+    """
+    thursday = _bars(["2026-09-23", "2026-09-24"])
+
+    frame = data_freshness({"MU": thursday}, asof=pd.Timestamp("2026-09-27"))
+
+    assert frame.loc["MU", "age_days"] == pytest.approx(3.0)
+    assert frame.loc["MU", "missed_sessions"] == pytest.approx(1.0)
+    assert not frame.loc["MU", "stale"]
+
+
+def test_data_freshness_tolerates_one_session_of_provider_lag() -> None:
+    """`MU` arrived a session behind the Taiwan symbols on 2026-09-25 and was fine."""
+    universe = {"AAA": _bars(["2026-01-08"]), "BBB": _bars(["2026-01-07"])}
+
+    frame = data_freshness(universe, asof=pd.Timestamp("2026-01-09"))
+
+    assert frame.loc["AAA", "missed_sessions"] == pytest.approx(0.0)
+    assert frame.loc["BBB", "missed_sessions"] == pytest.approx(1.0)
+    assert not frame.loc["BBB", "stale"]
+
+
+def test_data_freshness_does_not_count_the_current_session() -> None:
+    """Today's close has not happened at the hour the downloader runs."""
+    frame = data_freshness({"AAA": _bars(["2026-01-07"])}, asof=pd.Timestamp("2026-01-08"))
+
+    assert frame.loc["AAA", "missed_sessions"] == pytest.approx(0.0)
+    assert not frame.loc["AAA", "stale"]
+
+
+def test_data_freshness_treats_a_bar_ahead_of_today_as_nothing_missed() -> None:
+    """A clock skew between the fetcher and the reader must not read as negative."""
+    frame = data_freshness({"AAA": _bars(["2026-01-09"])}, asof=pd.Timestamp("2026-01-07"))
+
+    assert frame.loc["AAA", "missed_sessions"] == pytest.approx(0.0)
+    assert not frame.loc["AAA", "stale"]
 
 
 def test_data_freshness_treats_an_unreadable_feed_as_stale() -> None:
@@ -852,6 +926,7 @@ def test_data_freshness_treats_an_unreadable_feed_as_stale() -> None:
 
     assert pd.isna(frame.loc["BBB", "last_bar"])
     assert not np.isfinite(frame.loc["BBB", "age_days"])
+    assert not np.isfinite(frame.loc["BBB", "missed_sessions"])
     assert frame.loc["BBB", "stale"]
     assert not frame.loc["AAA", "stale"]
 
@@ -860,14 +935,14 @@ def test_data_freshness_is_empty_for_an_empty_universe() -> None:
     frame = data_freshness({})
 
     assert frame.empty
-    assert list(frame.columns) == ["last_bar", "age_days", "stale"]
+    assert list(frame.columns) == ["last_bar", "age_days", "missed_sessions", "stale"]
 
 
 def test_data_freshness_threshold_is_configurable() -> None:
     universe = {"AAA": _bars(["2026-01-06"])}
 
-    lenient = data_freshness(universe, asof=pd.Timestamp("2026-01-12"), stale_after_days=10)
-    strict = data_freshness(universe, asof=pd.Timestamp("2026-01-12"), stale_after_days=2)
+    lenient = data_freshness(universe, asof=pd.Timestamp("2026-01-12"), allow_missed_sessions=10)
+    strict = data_freshness(universe, asof=pd.Timestamp("2026-01-12"), allow_missed_sessions=0)
 
     assert not lenient.loc["AAA", "stale"]
     assert strict.loc["AAA", "stale"]
