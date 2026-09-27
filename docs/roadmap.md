@@ -24,6 +24,47 @@ empty queue is a real answer, and a day that pushes nothing is a fine outcome.
 
 ## Done
 
+- [x] **Judge price freshness in missed sessions, not calendar days**
+  (`data_freshness`, 2026-09-27). A defect found while reading the day's
+  journal report, not from the queue - the queue was empty.
+
+  The report's verdict read `age_days > 4`, calendar days from the last bar to
+  today. A calendar-day age means a different thing on every weekday: three
+  days old is a healthy Monday reading a Friday bar, and two missing closes on
+  a Wednesday. A single threshold over a quantity whose healthy value moves
+  with the day of week has to be loose enough for the loosest day, and is
+  therefore blind on the rest.
+
+  The 2026-09-27 report showed it in its mildest form and still showed it.
+  Friday 2026-09-25 never arrived for any of the four symbols - every last bar
+  was Thursday 2026-09-24, with no weekday gap anywhere else in the recent
+  history - and the report opened with "Prices are current: every symbol's
+  last bar is 3 day(s) old" and `behind? = no` on all four rows. The blind
+  spot is not only the weekend one: a feed that stops after a Tuesday close
+  reads as fresh on the Wednesday, the Thursday *and* the Friday under the old
+  rule, and only trips on the Sunday.
+
+  `missed_sessions` is the weekdays that have closed since the symbol's last
+  bar, both ends excluded - the last bar has arrived, and today's own close
+  has not happened at the hour the downloader runs. Its healthy value is zero
+  every day of the week, so one threshold means the same thing on all of them.
+  `age_days` is still reported, because it is what a reader wants to see; it
+  just no longer decides.
+
+  The allowance is one session, not zero, and the reason is in the data: on
+  2026-09-25 `MU` was a session behind the three Taiwan symbols, which is an
+  ordinary provider lag rather than an outage. So the verdict is three states
+  instead of two - nothing missing, something missing but under the allowance,
+  and behind - because a feed that has stopped is indistinguishable from a
+  slow provider on its first day, and the honest thing is to say which day it
+  is rather than to wave it through as "current".
+
+  `--fail-if-stale` is deliberately untouched. It backs an exit code that
+  turns a build red, so it keeps counting calendar days against a threshold
+  wide enough to clear a Lunar New Year closure; `stale_symbols` already
+  re-derived its own verdict rather than reading the `stale` column, which is
+  what let the two diverge without a second code path.
+
 - [x] **Show the whole open book in the journal's "In flight" table**
   (`in_flight_table`, 2026-09-26). A defect found while reading the day's
   journal report, not from the queue - the queue was empty.

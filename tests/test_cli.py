@@ -7,8 +7,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from ai_stock.cli import _horizon_label, build_parser, main
+from ai_stock.cli import _freshness_line, _horizon_label, build_parser, main
 from ai_stock.data.loaders import load_csv
+from ai_stock.journal import data_freshness
 from ai_stock.models.registry import available_models
 
 SMALL = ["--days", "700", "--seed", "5", "--train-size", "400", "--test-size", "100"]
@@ -484,7 +485,7 @@ def test_journal_fail_if_stale_is_quiet_on_a_current_feed(tmp_path: Path, capsys
 
 
 def test_journal_fail_if_stale_accepts_its_own_threshold(tmp_path: Path) -> None:
-    """The workflow sets this wider than the report's four days, on purpose.
+    """The workflow sets this wider than the bare flag's four days, on purpose.
 
     The Taiwan market shuts for up to nine calendar days over Lunar New Year, so
     the build alarm has to be able to sit further out than the line a person
@@ -495,8 +496,25 @@ def test_journal_fail_if_stale_accepts_its_own_threshold(tmp_path: Path) -> None
 
     assert main(_journal_argv(folder, tmp_path / "a.csv", "--fail-if-stale", "10")) == 0
     assert main(_journal_argv(folder, tmp_path / "b.csv", "--fail-if-stale", "3")) == 3
-    # And the bare flag still means the report's own four days.
+    # And the bare flag still means STALE_AFTER_DAYS, four calendar days.
     assert main(_journal_argv(folder, tmp_path / "c.csv", "--fail-if-stale")) == 3
+
+
+def test_the_run_summary_names_a_missing_session_it_is_not_alarmed_by() -> None:
+    """The line this session's daily routine reads, on the 2026-09-27 case.
+
+    A bare date here is what let a whole universe drop Friday's close and still
+    look healthy at a glance. The threshold verdict is unchanged - one session
+    is not an alarm - but the line says the session is gone.
+    """
+    thursday = pd.DataFrame({"close": [1.0]}, index=pd.to_datetime(["2026-09-24"]))
+    friday = pd.DataFrame({"close": [1.0]}, index=pd.to_datetime(["2026-09-25"]))
+
+    behind = _freshness_line(data_freshness({"MU": thursday}, asof=pd.Timestamp("2026-09-27")))
+    current = _freshness_line(data_freshness({"MU": friday}, asof=pd.Timestamp("2026-09-27")))
+
+    assert behind == "2026-09-24  (1 weekday session(s) missing, under the threshold)"
+    assert current == "2026-09-25"
 
 
 def test_journal_stays_green_on_a_stale_feed_without_the_flag(tmp_path: Path) -> None:
