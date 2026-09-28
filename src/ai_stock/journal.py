@@ -161,8 +161,17 @@ class ScoreResult:
         every day pays for it the moment it flips, not once its horizon
         elapses, so this should not wait on scoring the way `hit_rate` and
         `live_ic` do. Averaged per symbol first, same convention as `live_ic`.
+
+        Rate per *session held*, not per journal row - see
+        :func:`_annualised_turnover`.
         """
-        columns = ["asof_date", "symbol", "position"]
+        columns = ["asof_date", "symbol", "turnover", "sessions_held"]
+        # `ScoreResult` is public and can be built from frames that never went
+        # through `score_journal`, so the columns are not guaranteed. Without
+        # them there is nothing to quote a rate over - see
+        # :func:`_annualised_turnover`.
+        if any(c not in self.scored.columns or c not in self.pending.columns for c in columns):
+            return float("nan")
         scored, pending = self.scored[columns], self.pending[columns]
         # Never hand an empty frame to concat: on pandas 2 that raises a
         # FutureWarning about all-NA columns (see `append_forecasts`), and a
@@ -178,10 +187,14 @@ class ScoreResult:
             combined = pd.concat([scored, pending], ignore_index=True)
         turnovers = []
         for _, group in combined.groupby("symbol"):
-            ordered = group.sort_values("asof_date")
-            if len(ordered) < 2:
+            # One forecast is one trade, not a rate: there is no stretch of
+            # holding to divide it over, so a lone row says nothing about how
+            # often this symbol trades and is left out rather than annualised.
+            if len(group) < 2:
                 continue
-            turnovers.append(float(ordered["position"].diff().abs().mean() * periods_per_year))
+            rate = _annualised_turnover(group, periods_per_year=periods_per_year)
+            if np.isfinite(rate):
+                turnovers.append(rate)
         return float(np.mean(turnovers)) if turnovers else float("nan")
 
     def metrics(self) -> dict[str, float]:
@@ -240,11 +253,12 @@ class ScoreResult:
             else float("nan")
         )
         span = pd.to_datetime(frame["asof_date"])
-        # Mirrors the backtest's `annual_turnover`: mean traded notional per
-        # forecast, annualised by the number of trading days in a year. Each
-        # symbol is recorded at most once per trading day, so this is on the
-        # same footing as the backtest's mean-per-bar figure.
-        annual_turnover = float(frame["turnover"].mean() * TRADING_DAYS_PER_YEAR)
+        # Mirrors the backtest's `annual_turnover`: traded notional per trading
+        # session, annualised by the number of sessions in a year. The backtest
+        # averages over a dense daily index, where one row *is* one session;
+        # the journal's rows are whatever the daily job managed to record, so
+        # the sessions are counted from the bars rather than from the rows.
+        annual_turnover = _annualised_turnover(frame)
         return {
             "n_scored": float(len(frame)),
             "n_pending": float(len(self.pending)),
@@ -640,6 +654,54 @@ def _realised_return(prices: pd.Series, asof: pd.Timestamp, horizon: int) -> flo
     return float(np.log(prices.iloc[end] / prices.iloc[start]))
 
 
+def _sessions_held(bars: pd.Index, asof: pd.Series) -> pd.Series:
+    """Trading sessions each journal row's position was held over.
+
+    The position taken on ``asof[i]`` stands until the next entry for that
+    symbol, so the sessions it covers are the bars in ``(asof[i-1], asof[i]]``.
+    The first entry opens the book on its own bar and covers one session, which
+    is what the backtest charges its opening trade over.
+
+    Counted from ``bars`` - the symbol's own price index - so a market holiday
+    is not a missing session, and a symbol that did not trade on a day its
+    neighbours did is not penalised for it.
+
+    >>> bars = pd.to_datetime(["2026-09-01", "2026-09-02", "2026-09-03"])
+    >>> _sessions_held(bars, pd.Series(pd.to_datetime(["2026-09-01", "2026-09-03"]))).tolist()
+    [1.0, 2.0]
+    """
+    if asof.empty:
+        return pd.Series(dtype=float, index=asof.index)
+    # `searchsorted(side="right")` counts the bars up to and including a date,
+    # so the difference between two of those counts is the bars strictly after
+    # the earlier one and up to the later.
+    seen = bars.searchsorted(asof.to_numpy(), side="right").astype(float)
+    held = np.diff(seen, prepend=np.nan)
+    held[0] = 1.0
+    return pd.Series(held, index=asof.index)
+
+
+def _annualised_turnover(
+    frame: pd.DataFrame, *, periods_per_year: int = TRADING_DAYS_PER_YEAR
+) -> float:
+    """Traded notional per session held, annualised.
+
+    Divides by the sessions the positions actually covered rather than by the
+    number of journal rows. The two agree only when the journal has a row for
+    every bar; a journal with holes in it - the daily job missing a run, a
+    symbol whose market was shut - has fewer rows than sessions, and a
+    per-row mean would then report the rate of a position that traded on every
+    one of them.
+    """
+    if "sessions_held" not in frame.columns or "turnover" not in frame.columns:
+        return float("nan")
+    usable = frame[np.isfinite(frame["sessions_held"])]
+    sessions = float(usable["sessions_held"].sum())
+    if not usable.empty and sessions > 0:
+        return float(usable["turnover"].sum() / sessions * periods_per_year)
+    return float("nan")
+
+
 def score_journal(
     journal: pd.DataFrame,
     universe: dict[str, pd.DataFrame],
@@ -657,7 +719,14 @@ def score_journal(
 
     if journal.empty:
         empty = pd.DataFrame(
-            columns=[*JOURNAL_COLUMNS, "turnover", "cost", "realised_return", "pnl"]
+            columns=[
+                *JOURNAL_COLUMNS,
+                "turnover",
+                "cost",
+                "sessions_held",
+                "realised_return",
+                "pnl",
+            ]
         )
         return ScoreResult(
             scored=empty,
@@ -674,6 +743,15 @@ def score_journal(
     previous = frame.groupby(["symbol", "model"])["position"].shift(1).fillna(0.0)
     frame["turnover"] = (frame["position"] - previous).abs()
     frame["cost"] = frame["turnover"] * cost_rate
+    # How long each of those positions stood, in that symbol's own sessions.
+    # `turnover` is what was traded; this is what it was traded over, and
+    # without it a rate can only be quoted per journal row.
+    frame["sessions_held"] = float("nan")
+    for (symbol, _model), group in frame.groupby(["symbol", "model"], sort=False):
+        ohlcv = universe.get(symbol)
+        if ohlcv is None:
+            continue
+        frame.loc[group.index, "sessions_held"] = _sessions_held(ohlcv.index, group["asof_date"])
 
     realised: list[float | None] = []
     for row in frame.itertuples(index=False):

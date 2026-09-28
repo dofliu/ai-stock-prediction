@@ -24,6 +24,59 @@ empty queue is a real answer, and a day that pushes nothing is a fine outcome.
 
 ## Done
 
+- [x] **Annualise the journal's turnover over sessions held, not journal rows**
+  (`_annualised_turnover`, `sessions_held`, 2026-09-28). A defect found while
+  reading the day's journal report, not from the queue - the queue was empty.
+
+  Both turnover figures averaged traded notional per *journal row* and
+  multiplied by 252. The backtest's `annual_turnover`, which the report says
+  these are "the same annualised traded-notional measure" as, averages over a
+  dense daily index where one row genuinely is one session. The journal's rows
+  are whatever the daily job managed to write down, and it has holes: the
+  ten-day Actions quota outage in 2026-09, `MU` missing 2026-09-07 for US
+  Labor Day while the Taiwan names traded, the three Taiwan names missing
+  2026-09-25 for Mid-Autumn while `MU` traded. Across a hole the formula
+  charges a multi-session hold as one day.
+
+  The 2026-09-28 report showed it in its mildest form and still showed it. It
+  printed `annual_turnover 130.0645` against an honest 115.20, and
+  `live_annual_turnover 113.4` against an honest 78.85 - the second is 44% high,
+  because it spans the outage and the matured window does not. The report
+  invites exactly that number to be multiplied by the cost in bps to read off
+  the yearly cost drag, so the overstatement lands directly on the one figure a
+  reader is told to compute by hand.
+
+  `sessions_held` counts the bars in `(previous asof_date, this asof_date]`
+  from the symbol's **own** price index, so a market holiday is not a missed
+  session and a Taiwan closure does not deflate `MU`. The first entry covers
+  one session, which is what the backtest charges its opening trade over. With
+  a row on every bar the two formulas then agree exactly, and
+  `test_turnover_over_a_full_journal_matches_the_backtest_measure` pins that
+  against `financial_metrics` directly rather than against a copy of its
+  arithmetic.
+
+  The test that carries the change writes the same ten bars and the same
+  positions twice - once with a row per bar, once with the eight interior
+  rows, none of which traded, deleted - and asserts both report the same rate.
+  The old formula answered 56.00 for the dense journal and 504.00 for the
+  sparse one: a nine-fold spread over no difference in trading. It is 75.60,
+  which is 3 units over 10 sessions.
+
+  Two things worth recording. **`live_annual_turnover` also stopped ignoring
+  the opening trade.** It recomputed `position.diff()` rather than reading the
+  `turnover` column `score_journal` records, so the 0 -> ±1 that opens a
+  symbol's book was dropped from the rate while `cost` and `total_pnl` on the
+  same rows charged it - two numbers in one table disagreeing about whether
+  opening a position is a trade. Both now read the same column. **And a
+  `ScoreResult` without `sessions_held` reports NaN rather than falling back.**
+  The dataclass is public and can be built from frames that never went through
+  `score_journal`; a per-row fallback would be the defect itself, reinstated
+  as an error path, so the honest answer is that the rate is unknown.
+
+  Every existing turnover test used a gapless journal, where rows and sessions
+  are the same thing - which is why this went unnoticed, and it is the third
+  finding in a row whose root cause is a fixture with no holes in it.
+
 - [x] **Judge price freshness in missed sessions, not calendar days**
   (`data_freshness`, 2026-09-27). A defect found while reading the day's
   journal report, not from the queue - the queue was empty.

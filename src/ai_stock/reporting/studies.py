@@ -1244,6 +1244,12 @@ def render_journal_report(
             "reports. Multiply it by the cost in bps to see the yearly cost drag this "
             "journal has actually paid - `total_pnl` already nets it out, but turnover is "
             "what makes that drag visible on its own.",
+            "Both are traded notional per *trading session*, counted from each symbol's own "
+            "bars, not per journal row. The two are the same thing only when the journal "
+            "holds a row for every session; across a gap - a day the job did not run, a "
+            "market holiday, an outage - a per-row rate charges a multi-session hold as if "
+            "it were one day and reports a strategy that trades more often than this one "
+            "does.",
         ]
     )
 
