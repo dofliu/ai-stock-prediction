@@ -13,6 +13,7 @@ import pytest
 from ai_stock.backtest.engine import signal_to_positions, simple_returns
 from ai_stock.config import TRADING_DAYS_PER_YEAR, BacktestConfig, ExperimentConfig, FeatureConfig
 from ai_stock.data.synthetic import generate_ohlcv
+from ai_stock.evaluation.metrics import financial_metrics
 from ai_stock.journal import (
     JOURNAL_COLUMNS,
     Forecast,
@@ -406,17 +407,126 @@ def test_turnover_counts_pending_forecasts_not_just_scored(tmp_path: Path, price
     metrics = result.metrics()
 
     assert metrics["n_scored"] == 0
-    # Positions are [1, -1, 1, 1]; the first has no prior position to diff
-    # against, so the mean is over the remaining three: (2 + 2 + 0) / 3.
-    expected = (4.0 / 3.0) * 252
+    # Positions are [1, -1, 1, 1] on four consecutive bars: opening the book
+    # trades 1 unit, then 2 and 2 and 0, over four sessions held.
+    expected = (5.0 / 4.0) * 252
     assert metrics["live_annual_turnover"] == pytest.approx(expected)
+
+
+def test_a_gap_in_the_journal_does_not_inflate_the_turnover_rate(tmp_path: Path, prices) -> None:
+    """Rows that recorded no trade must not change the measured trading rate.
+
+    This is the test that carries the change. The journal is written twice
+    over the same ten bars and the same positions - once with a row on every
+    bar, once with the eight interior rows deleted. Nothing was traded on the
+    rows that were removed, so no trade is lost; only the evidence that the
+    position sat still is. A turnover averaged per journal row reads the
+    sparse journal as a position that opened and reversed on consecutive days
+    and reports five times the rate of the dense one.
+
+    The hole is the shape the real journal has: the daily workflow lost ten
+    calendar days to an Actions quota outage in 2026-09 and the gap is
+    permanent, because a forecast cannot be backfilled.
+    """
+    config = ExperimentConfig(
+        features=FeatureConfig(horizon=5), backtest=BacktestConfig(cost_bps=0.0, slippage_bps=0.0)
+    )
+    dates = prices["AAA"].index[-10:]
+    # Open long, hold for eight sessions, reverse on the last: 1 + 2 units
+    # traded over ten sessions, whichever rows are written down.
+    positions = [1.0] * 9 + [-1.0]
+    every_bar = [
+        Forecast(d, "AAA", "manual", 5, p, p, 100.0) for d, p in zip(dates, positions, strict=True)
+    ]
+
+    dense, sparse = tmp_path / "dense.csv", tmp_path / "sparse.csv"
+    append_forecasts(dense, every_bar)
+    append_forecasts(sparse, [every_bar[0], every_bar[-1]])
+
+    dense_rate = score_journal(load_journal(dense), prices, config).metrics()
+    sparse_rate = score_journal(load_journal(sparse), prices, config).metrics()
+
+    expected = 3.0 / 10.0 * TRADING_DAYS_PER_YEAR
+    assert dense_rate["live_annual_turnover"] == pytest.approx(expected)
+    assert sparse_rate["live_annual_turnover"] == pytest.approx(expected)
+    # What the per-row mean would have said about the sparse journal.
+    assert sparse_rate["live_annual_turnover"] != pytest.approx(1.5 * TRADING_DAYS_PER_YEAR)
+
+
+def test_turnover_over_a_full_journal_matches_the_backtest_measure(tmp_path: Path, prices) -> None:
+    """The claim the report makes: the same measure the backtest reports.
+
+    With a row on every bar the journal's sessions are its rows, so the two
+    formulas have to agree exactly - that is the case the per-row mean got
+    right, and the one the session count must not break.
+    """
+    config = ExperimentConfig(
+        features=FeatureConfig(horizon=5), backtest=BacktestConfig(cost_bps=0.0, slippage_bps=0.0)
+    )
+    dates = prices["AAA"].index[-12:]
+    positions = [1.0, 1.0, -1.0, -1.0, 0.0, 1.0, 1.0, 1.0, -1.0, 0.0, 0.0, 1.0]
+    append_forecasts(
+        tmp_path / "f.csv",
+        [
+            Forecast(d, "AAA", "manual", 5, p, p, 100.0)
+            for d, p in zip(dates, positions, strict=True)
+        ],
+    )
+
+    live = score_journal(load_journal(tmp_path / "f.csv"), prices, config).metrics()
+    backtest = financial_metrics(
+        pd.Series(0.0, index=dates), positions=pd.Series(positions, index=dates)
+    )
+
+    assert live["live_annual_turnover"] == pytest.approx(backtest["annual_turnover"])
+
+
+def test_sessions_held_counts_the_symbols_own_bars_not_calendar_days(
+    tmp_path: Path, prices
+) -> None:
+    """A market holiday is not a session, so a hold across one is not charged for it.
+
+    `MU` and the Taiwan symbols shut on different days - US Labor Day, Lunar
+    New Year - so counting weekdays would read a symbol's own closure as a
+    session it was held over and understate its rate. The bars say otherwise.
+    """
+    config = ExperimentConfig(features=FeatureConfig(horizon=5), backtest=BacktestConfig())
+    bars = prices["AAA"]
+    # Drop three interior bars: the symbol did not trade on them at all.
+    shut = bars.index[-6:-3]
+    open_bars = bars.drop(index=shut)
+    dates = [bars.index[-7], bars.index[-2]]
+    append_forecasts(
+        tmp_path / "f.csv",
+        [
+            Forecast(d, "AAA", "manual", 5, p, p, 100.0)
+            for d, p in zip(dates, [1.0, -1.0], strict=True)
+        ],
+    )
+    journal = load_journal(tmp_path / "f.csv")
+
+    with_holiday = score_journal(journal, {"AAA": open_bars}, config)
+    without = score_journal(journal, {"AAA": bars}, config)
+
+    def held(result) -> list[float]:
+        # Whether a row has matured is beside the point here; the second one
+        # matures against the full bars and not against the shortened ones.
+        rows = pd.concat([result.scored, result.pending]).sort_values("asof_date")
+        return rows["sessions_held"].tolist()
+
+    # Second row: two sessions after the first once the closure is gone from
+    # the calendar, five when those three shut days are counted as sessions.
+    assert held(with_holiday) == [1.0, 2.0]
+    assert held(without) == [1.0, 5.0]
 
 
 def test_turnover_is_nan_with_a_single_forecast_per_symbol(prices, journal_config) -> None:
     forecasts = record_forecasts(prices, "ridge", journal_config)
     result = ScoreResult(
         scored=pd.DataFrame(columns=[*JOURNAL_COLUMNS, "cost", "realised_return", "pnl"]),
-        pending=pd.DataFrame([f.as_row() for f in forecasts]).assign(cost=0.0),
+        pending=pd.DataFrame([f.as_row() for f in forecasts]).assign(
+            cost=0.0, turnover=1.0, sessions_held=1.0
+        ),
         cost_bps=5.0,
     )
     assert np.isnan(result.metrics()["live_annual_turnover"])
@@ -430,7 +540,11 @@ def test_metrics_and_per_symbol_breakdown(daily_journal, prices, journal_config)
     assert metrics["n_symbols"] == 2
     assert 0.0 <= metrics["hit_rate"] <= 1.0
     assert metrics["total_pnl"] == pytest.approx(result.scored["pnl"].sum())
-    expected_turnover = result.scored["turnover"].mean() * TRADING_DAYS_PER_YEAR
+    expected_turnover = (
+        result.scored["turnover"].sum()
+        / result.scored["sessions_held"].sum()
+        * TRADING_DAYS_PER_YEAR
+    )
     assert metrics["annual_turnover"] == pytest.approx(expected_turnover)
 
     per_symbol = result.by_symbol()
