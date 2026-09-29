@@ -1286,6 +1286,14 @@ def render_journal_report(
                 "Forecasts recorded daily against a multi-day horizon overlap, and a "
                 "single-sector universe moves together, so `n_decided` badly overstates how "
                 "many independent bets have been placed.",
+                "The windows are cut on the universe's own trading calendar, not on the "
+                "dates the journal happens to hold. Those are the same thing only while the "
+                "daily job never misses a run; across a hole - the ten-day Actions outage in "
+                "2026-09 is the one in this record - the journal's dates close up, and two "
+                "forecasts with no outcome day in common get counted as one observation. "
+                "That error only ever lowers `n_independent`, which widens the standard "
+                "error and pulls z toward zero, so it is the decay warning that would have "
+                "gone quiet.",
                 "`hit_rate_z_naive` is the same shortfall at `n_decided` trials, which is what "
                 "this report used to print. It assumes zero redundancy and `hit_rate_z` assumes "
                 "total redundancy within a window, so the honest figure lies between them. They "
