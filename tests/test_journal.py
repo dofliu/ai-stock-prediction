@@ -632,6 +632,96 @@ def test_independent_blocks_of_nothing_is_zero() -> None:
     assert independent_blocks(_fake_scored(3, [True] * 3).iloc[:0]) == 0
 
 
+def _on_sessions(calendar: pd.DatetimeIndex, positions: list[int], horizon: int) -> pd.DataFrame:
+    """A scored frame holding one forecast on each of `positions` in `calendar`."""
+    frame = _fake_scored(len(positions), [True] * len(positions), horizon=horizon)
+    frame["asof_date"] = calendar[positions]
+    return frame
+
+
+def test_a_gap_in_the_journal_is_not_two_adjacent_sessions() -> None:
+    """Two forecasts sharing no outcome day are two observations, not one.
+
+    The defect this carries: the block calendar was the journal's own dates,
+    so a stretch the daily job never recorded simply closed up. Here the two
+    forecasts are nine sessions apart at a five-day horizon - their outcome
+    windows do not touch - and the journal, which holds only those two rows,
+    cannot see the eight sessions in between.
+    """
+    calendar = pd.bdate_range("2024-01-01", periods=10)
+    scored = _on_sessions(calendar, [0, 9], horizon=5)
+
+    assert independent_blocks(scored, calendar) == 2
+    # What the journal's dates alone say, and why they may not be asked.
+    assert independent_blocks(scored) == 1
+
+
+def test_recording_fewer_days_cannot_move_a_forecast_into_another_block() -> None:
+    """Which block a forecast falls in is a fact about its date, not its neighbours.
+
+    One forecast in each of three consecutive five-session blocks is three
+    independent bets whether or not the days between them were also recorded.
+    Counting on the journal's rows made it depend on the neighbours: with the
+    interior days present it read three, and with them missing it read one.
+    """
+    calendar = pd.bdate_range("2024-01-01", periods=15)
+    dense = _on_sessions(calendar, list(range(15)), horizon=5)
+    sparse = _on_sessions(calendar, [0, 5, 10], horizon=5)
+
+    assert independent_blocks(dense, calendar) == 3
+    assert independent_blocks(sparse, calendar) == 3
+    assert independent_blocks(sparse) == 1
+
+
+def test_a_journal_with_a_row_on_every_session_is_unchanged_by_the_calendar() -> None:
+    """The calendar only ever adds sessions the journal is missing.
+
+    A gapless journal's dates *are* the calendar, so supplying one must not
+    move a number that was already right - the whole existing record of
+    `hit_rate_z` was computed this way.
+    """
+    calendar = pd.bdate_range("2024-01-01", periods=12)
+    dense = _on_sessions(calendar, list(range(12)), horizon=5)
+
+    assert independent_blocks(dense) == independent_blocks(dense, calendar) == 3
+
+
+def test_score_journal_carries_the_universe_calendar_into_the_z_score() -> None:
+    """The end-to-end path: prices supply the sessions, the journal does not.
+
+    The recorded sessions are the shape the real record took: an unbroken run,
+    one day the job missed, three more, then the ten-session 2026-09 Actions
+    outage. Every session is in the price index; six of the fifteen are in no
+    journal row.
+    """
+    calendar = pd.bdate_range("2024-01-01", periods=25)
+    bars = pd.DataFrame({"close": np.linspace(100.0, 124.0, 25)}, index=calendar)
+    recorded = [0, 1, 2, 3, 4, 6, 7, 8, 14]
+    journal = pd.DataFrame(
+        {
+            "asof_date": calendar[recorded],
+            "symbol": "AAA",
+            "model": "manual",
+            "horizon": 5,
+            "signal": 0.01,
+            "position": 1.0,
+            "close": bars["close"].to_numpy()[recorded],
+        }
+    )
+
+    config = ExperimentConfig(features=FeatureConfig(horizon=5))
+    live = score_journal(journal, {"AAA": bars}, config)
+
+    assert live.calendar is not None
+    assert list(live.calendar) == list(calendar)
+    assert len(live.scored) == len(recorded)
+    comparison = compare_with_backtest(live, {"directional_accuracy": 0.5})
+    # Blocks of five sessions: 0-4 in the first, 6-8 in the second, 14 in the
+    # third. The journal's own nine dates run 0-8 and reach only the second.
+    assert comparison["n_independent"] == 3
+    assert independent_blocks(live.scored) == 2
+
+
 def test_overlap_shrinks_the_z_score_it_used_to_overstate() -> None:
     """The headline z must not count the same market move five times.
 

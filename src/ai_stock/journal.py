@@ -78,7 +78,7 @@ def _decided(scored: pd.DataFrame) -> pd.DataFrame:
     return scored[scored["position"].to_numpy(float) != 0.0]
 
 
-def independent_blocks(scored: pd.DataFrame) -> int:
+def independent_blocks(scored: pd.DataFrame, calendar: pd.Index | None = None) -> int:
     """How many non-overlapping horizon windows a set of forecasts covers.
 
     A journal records every symbol every trading day, but a forecast with a
@@ -94,11 +94,22 @@ def independent_blocks(scored: pd.DataFrame) -> int:
     a property of the recording schedule alone, not of the returns, so there
     is no correlation estimate here to be wrong about or to tune.
 
-    Trading days are taken from the dates the journal actually contains, which
-    is what a journal is: one row per symbol per day the market was open. A
+    ``calendar`` is the trading sessions the forecasts were recorded against -
+    :func:`score_journal` supplies the union of the universe's price indices,
+    and blocks are cut on it starting from the first date in ``scored``. A
     universe spanning two calendars (Taipei and New York) contributes the
     union of its trading days, which can only make the block count larger and
     the resulting standard error smaller, so it is the generous direction.
+
+    **Without a ``calendar`` the journal's own dates stand in for it**, which
+    assumes the journal holds a row for every session. That is what a journal
+    is meant to be and not what one with holes in it is: a day the job never
+    ran, or an outage, is then not a gap at all but two adjacent dates, and
+    two forecasts sharing no outcome day whatever are counted as one
+    observation. The error is always in the same direction - fewer
+    independent windows than were really placed, so a larger standard error
+    and a ``hit_rate_z`` pulled toward zero - which is the expensive
+    direction, because it is the decay warning that goes quiet.
 
     >>> frame = pd.DataFrame(
     ...     {
@@ -108,13 +119,30 @@ def independent_blocks(scored: pd.DataFrame) -> int:
     ... )
     >>> independent_blocks(frame)
     1
+
+    A gap the journal cannot see, next to the sessions that fill it:
+
+    >>> gapped = pd.DataFrame(
+    ...     {"asof_date": pd.to_datetime(["2024-01-01", "2024-01-11"]), "horizon": 5}
+    ... )
+    >>> independent_blocks(gapped)
+    1
+    >>> independent_blocks(gapped, pd.bdate_range("2024-01-01", "2024-01-11"))
+    2
     """
     if scored.empty:
         return 0
     horizon = max(int(pd.to_numeric(scored["horizon"]).max()), 1)
     dates = pd.to_datetime(scored["asof_date"])
-    calendar = pd.Index(np.sort(dates.unique()))
-    position = calendar.get_indexer(pd.Index(dates))
+    sessions = pd.DatetimeIndex(np.sort(dates.unique()))
+    if calendar is not None:
+        # A journal date missing from the calendar was still a session - a bar
+        # was recorded on it - so it is added rather than dropped, and blocks
+        # are cut from the first forecast so the origin does not depend on how
+        # much price history happens to sit in front of the journal.
+        sessions = pd.DatetimeIndex(calendar).union(sessions)
+        sessions = sessions[sessions >= dates.min()]
+    position = sessions.get_indexer(pd.Index(dates))
     return int(np.unique(position // horizon).size)
 
 
@@ -150,6 +178,16 @@ class ScoreResult:
     pending: pd.DataFrame
     """Forecasts still waiting for the future to arrive."""
     cost_bps: float
+    calendar: pd.Index | None = None
+    """The trading sessions these forecasts were recorded against.
+
+    The union of the universe's price indices, as :func:`score_journal` saw
+    them. It is what :func:`independent_blocks` cuts its windows on, so that a
+    day the daily job missed stays a gap instead of becoming two adjacent
+    journal rows. ``None`` when the result was not built by
+    :func:`score_journal` - the block count then falls back to the journal's
+    own dates, with the consequence :func:`independent_blocks` describes.
+    """
 
     def __len__(self) -> int:
         return len(self.scored)
@@ -702,6 +740,20 @@ def _annualised_turnover(
     return float("nan")
 
 
+def _trading_calendar(universe: dict[str, pd.DataFrame]) -> pd.DatetimeIndex:
+    """Every session any symbol in the universe traded, in order.
+
+    The union rather than the intersection, for the reason
+    :func:`independent_blocks` gives: a universe spanning Taipei and New York
+    has days only one of them traded, and counting them is the generous
+    direction for the block count that divides the headline standard error.
+    """
+    sessions = pd.DatetimeIndex([])
+    for ohlcv in universe.values():
+        sessions = sessions.union(pd.DatetimeIndex(ohlcv.index))
+    return sessions
+
+
 def score_journal(
     journal: pd.DataFrame,
     universe: dict[str, pd.DataFrame],
@@ -713,9 +765,15 @@ def score_journal(
     ``asof_date`` exists in the price series. Costs are charged on the change in
     position from that symbol's previous journal entry, so a signal that flips
     every day pays for it here exactly as it would in the backtest.
+
+    The result carries the universe's trading calendar, because two of the
+    numbers read off it - ``sessions_held`` and the block count behind
+    ``hit_rate_z`` - are rates over sessions and the journal's rows are not
+    sessions wherever a day's run went missing.
     """
     config = config or ExperimentConfig()
     cost_rate = config.backtest.total_cost_bps * _BPS
+    calendar = _trading_calendar(universe)
 
     if journal.empty:
         empty = pd.DataFrame(
@@ -732,6 +790,7 @@ def score_journal(
             scored=empty,
             pending=empty.drop(columns=["realised_return", "pnl"]),
             cost_bps=config.backtest.total_cost_bps,
+            calendar=calendar,
         )
 
     frame = journal.copy()
@@ -769,7 +828,12 @@ def score_journal(
 
     scored = frame[matured].reset_index(drop=True)
     pending = frame[~matured].drop(columns=["realised_return", "pnl"]).reset_index(drop=True)
-    return ScoreResult(scored=scored, pending=pending, cost_bps=config.backtest.total_cost_bps)
+    return ScoreResult(
+        scored=scored,
+        pending=pending,
+        cost_bps=config.backtest.total_cost_bps,
+        calendar=calendar,
+    )
 
 
 def compare_with_backtest(
@@ -787,7 +851,9 @@ def compare_with_backtest(
       universe both mean the same market move is counted several times.
     - ``hit_rate_z`` counts :func:`independent_blocks` instead - non-overlapping
       windows of ``horizon`` trading days, with everything inside a window
-      treated as one observation.
+      treated as one observation. Cut on ``live.calendar``, the sessions the
+      market actually held, so a day the journal is missing stays a gap rather
+      than closing up and merging two windows that share no outcome day.
 
     The first assumes zero redundancy and the second assumes total redundancy
     within a window, so the honest significance sits between them and the
@@ -801,7 +867,7 @@ def compare_with_backtest(
     metrics = live.metrics()
     decided = _decided(live.scored)
     n_decided = float(len(decided))
-    n_independent = float(independent_blocks(decided))
+    n_independent = float(independent_blocks(decided, live.calendar))
     claimed = backtest_metrics.get("directional_accuracy", float("nan"))
     observed = metrics["hit_rate"]
 
@@ -899,7 +965,12 @@ def rolling_compare_with_backtest(
         if high - low < window:
             continue
         chunk = frame.iloc[low:high]
-        window_result = ScoreResult(scored=chunk, pending=empty_pending, cost_bps=live.cost_bps)
+        window_result = ScoreResult(
+            scored=chunk,
+            pending=empty_pending,
+            cost_bps=live.cost_bps,
+            calendar=live.calendar,
+        )
         comparison = compare_with_backtest(window_result, backtest_metrics)
         comparison["asof_date"] = dates[end]
         rows.append(comparison)

@@ -24,6 +24,56 @@ empty queue is a real answer, and a day that pushes nothing is a fine outcome.
 
 ## Done
 
+- [x] **Cut the journal's independence blocks on the market's calendar, not on
+  the journal's rows** (`independent_blocks`, `ScoreResult.calendar`,
+  2026-09-29). A defect found while reading the day's journal report, not from
+  the queue - the queue was empty.
+
+  `independent_blocks` built its trading calendar from `scored["asof_date"]`,
+  the dates the journal happens to hold, and its docstring justified that with
+  "which is what a journal is: one row per symbol per day the market was
+  open". This journal is not that. It is missing 2026-09-08 entirely, and it
+  is missing 2026-09-14 through 2026-09-18 to the Actions quota outage. On the
+  journal's own dates those holes do not exist - 2026-09-11 and 2026-09-21 are
+  simply adjacent - so two forecasts whose five-day outcome windows share not
+  one day were counted as a single observation.
+
+  `n_independent` is the sample size `hit_rate_z` divides by, and `hit_rate_z`
+  is the one number this project says to read before any other. The 2026-09-29
+  report showed the defect in its mildest form and still showed it: 2
+  independent horizons where the price index says 3, and `z = 0.1786` where
+  the honest figure is 0.2187. The error has a fixed sign - a journal can only
+  be missing sessions, never gain them - so it always understates the block
+  count, always overstates the standard error, and always pulls z toward zero.
+  That is the expensive direction: the failure mode is a real decay that never
+  trips the `z <= -2` alarm.
+
+  `score_journal` now carries the union of the universe's price indices on
+  `ScoreResult.calendar` and `compare_with_backtest` cuts blocks on it,
+  anchored at the first matured forecast so the block boundaries do not depend
+  on how much price history sits in front of the journal. The union, not the
+  intersection, for the reason the function already gave for two markets: a
+  day only New York traded is still a session, and counting it can only raise
+  the block count.
+
+  The fallback is kept rather than made an error, unlike `sessions_held`'s:
+  `independent_blocks` is public and takes a frame of forecasts, and on a
+  gapless journal the journal's dates *are* the calendar, and
+  `test_a_journal_with_a_row_on_every_session_is_unchanged_by_the_calendar`
+  pins that the whole existing record of `hit_rate_z` is unmoved. What changed is that the
+  docstring now names the failure mode and its direction instead of asserting
+  the assumption holds.
+
+  The carrying test puts two forecasts nine sessions apart at a five-day
+  horizon - no shared outcome day - and asserts the count is 2 on the calendar
+  against the 1 the journal's dates give. A second test makes the point the
+  other way: one forecast in each of three consecutive blocks is three bets
+  whether or not the days between them were recorded, and the old rule read it
+  as one. Every existing block test used `pd.date_range(freq="D")` with a row
+  on every date, where rows and sessions cannot differ - which is why this
+  went unnoticed, and it is the fourth finding in a row whose root cause is a
+  fixture with no holes in it.
+
 - [x] **Annualise the journal's turnover over sessions held, not journal rows**
   (`_annualised_turnover`, `sessions_held`, 2026-09-28). A defect found while
   reading the day's journal report, not from the queue - the queue was empty.
