@@ -13,7 +13,7 @@ import pytest
 from ai_stock.backtest.engine import signal_to_positions, simple_returns
 from ai_stock.config import TRADING_DAYS_PER_YEAR, BacktestConfig, ExperimentConfig, FeatureConfig
 from ai_stock.data.synthetic import generate_ohlcv
-from ai_stock.evaluation.metrics import financial_metrics
+from ai_stock.evaluation.metrics import financial_metrics, sharpe_ratio
 from ai_stock.journal import (
     JOURNAL_COLUMNS,
     Forecast,
@@ -1213,3 +1213,102 @@ def test_stale_symbols_is_exclusive_at_the_threshold() -> None:
     assert frame.loc["AAA", "age_days"] == pytest.approx(4.0)
     assert stale_symbols(frame, older_than_days=4) == []
     assert stale_symbols(frame, older_than_days=3) == ["AAA"]
+
+
+def test_live_sharpe_is_annualised_over_holding_periods_not_sessions() -> None:
+    """The test that carries the change.
+
+    One row of journal P&L is what a position made over `horizon` sessions.
+    Annualising it at 252 - the count the backtest uses, where a row genuinely
+    is a session - scales the ratio by `sqrt(252)` when only `252 / horizon`
+    holding periods fit in a year. The error is a flat `sqrt(horizon)`, always
+    upward, and it lands on the one figure in the report that reads as
+    risk-adjusted return.
+
+    The P&L is held fixed and only the horizon it was recorded at varies, which
+    is the one thing the annualisation may depend on. Scoring the same dates at
+    two horizons would not isolate it: a five-day realised return is a
+    different number from a one-day one, so the P&L would move too and the
+    factor could not be read off the result.
+    """
+    pnl = [0.02, -0.01, 0.03, -0.02, 0.01, 0.0]
+
+    def sharpe_at(horizon: int) -> float:
+        scored = pd.DataFrame({"pnl": pnl, "horizon": horizon, "position": 1.0})
+        scored["signal"] = scored["pnl"]
+        scored["realised_return"] = scored["pnl"]
+        scored["symbol"] = "AAA"
+        scored["asof_date"] = pd.date_range("2026-01-05", periods=len(pnl), freq="B")
+        result = ScoreResult(scored=scored, pending=pd.DataFrame(), cost_bps=0.0)
+        return result.metrics()["live_sharpe"]
+
+    per_period = sharpe_ratio(np.array(pnl), periods_per_year=1)
+
+    # One row is one session only at horizon 1; that is the case the old
+    # formula got right, and it applied the same factor to every other.
+    assert sharpe_at(1) == pytest.approx(per_period * math.sqrt(TRADING_DAYS_PER_YEAR))
+    assert sharpe_at(5) == pytest.approx(per_period * math.sqrt(TRADING_DAYS_PER_YEAR / 5))
+    assert sharpe_at(5) == pytest.approx(sharpe_at(1) / math.sqrt(5))
+    # What the per-session count said about the five-day journal this project
+    # actually keeps: the same ratio, a factor of sqrt(5) larger.
+    assert sharpe_at(5) != pytest.approx(per_period * math.sqrt(TRADING_DAYS_PER_YEAR))
+
+
+def test_live_sharpe_matches_the_shared_metric_at_a_one_day_horizon(tmp_path: Path, prices) -> None:
+    """At `horizon=1` a journal row *is* a session, so the two must agree exactly.
+
+    This is the case the old formula got right and the one the period count
+    must not break. Pinned against `sharpe_ratio` itself rather than a copy of
+    its arithmetic - re-implementing it locally is how the annualisation came
+    to differ from the shared one in the first place.
+    """
+    config = ExperimentConfig(
+        features=FeatureConfig(horizon=1), backtest=BacktestConfig(cost_bps=0.0, slippage_bps=0.0)
+    )
+    dates = prices["AAA"].index[-12:-4]
+    positions = [1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0, 1.0]
+    path = tmp_path / "f.csv"
+    append_forecasts(
+        path,
+        [
+            Forecast(d, "AAA", "manual", 1, p, p, 100.0)
+            for d, p in zip(dates, positions, strict=True)
+        ],
+    )
+
+    result = score_journal(load_journal(path), prices, config)
+
+    assert result.metrics()["live_sharpe"] == pytest.approx(
+        sharpe_ratio(result.scored["pnl"].to_numpy(float))
+    )
+
+
+def test_live_sharpe_is_nan_when_the_journal_mixes_horizons(tmp_path: Path, prices) -> None:
+    """Two period lengths in one column, and no honest way to pick between them.
+
+    A journal is not filtered by horizon before scoring - `score_journal` takes
+    whatever rows are on disk - so a second horizon appearing in the file is a
+    real case, not a malformed one. Rather than annualise the mixture at one of
+    the two and be wrong about the other rows, it declines. Everything else in
+    the table still reports: a mixed horizon makes the *rate* meaningless, not
+    the P&L.
+    """
+    config = ExperimentConfig(
+        features=FeatureConfig(horizon=5), backtest=BacktestConfig(cost_bps=0.0, slippage_bps=0.0)
+    )
+    # Far enough from the end that the ten-day rows mature too - a horizon
+    # that never matures leaves `scored` on a single horizon and tests nothing.
+    dates = prices["AAA"].index[-40:-36]
+    path = tmp_path / "mixed.csv"
+    append_forecasts(
+        path,
+        [
+            Forecast(d, "AAA", "manual", h, p, p, 100.0)
+            for d, h, p in zip(dates, [5, 5, 10, 10], [1.0, -1.0, 1.0, -1.0], strict=True)
+        ],
+    )
+
+    metrics = score_journal(load_journal(path), prices, config).metrics()
+
+    assert np.isnan(metrics["live_sharpe"])
+    assert np.isfinite(metrics["total_pnl"])

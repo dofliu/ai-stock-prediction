@@ -27,6 +27,7 @@ import pandas as pd
 from ai_stock.backtest.engine import signal_to_positions, simple_returns, trailing_volatility
 from ai_stock.config import TRADING_DAYS_PER_YEAR, BacktestConfig, ExperimentConfig
 from ai_stock.data.loaders import validate_ohlcv
+from ai_stock.evaluation.metrics import sharpe_ratio
 from ai_stock.features.builder import build_dataset, build_features
 from ai_stock.models.registry import create_model
 
@@ -285,11 +286,7 @@ class ScoreResult:
         ic = float(np.mean(finite_ic)) if finite_ic else float("nan")
         # Per-forecast returns overlap when horizon > 1, so this Sharpe is a
         # rough health check, not a tradable statistic.
-        sharpe = (
-            float(np.mean(pnl) / np.std(pnl, ddof=1) * math.sqrt(TRADING_DAYS_PER_YEAR))
-            if len(frame) >= 2 and np.std(pnl, ddof=1) > 1e-12
-            else float("nan")
-        )
+        sharpe = _live_sharpe(frame)
         span = pd.to_datetime(frame["asof_date"])
         # Mirrors the backtest's `annual_turnover`: traded notional per trading
         # session, annualised by the number of sessions in a year. The backtest
@@ -738,6 +735,54 @@ def _annualised_turnover(
     if not usable.empty and sessions > 0:
         return float(usable["turnover"].sum() / sessions * periods_per_year)
     return float("nan")
+
+
+def _live_sharpe(scored: pd.DataFrame, *, periods_per_year: int = TRADING_DAYS_PER_YEAR) -> float:
+    """Annualised Sharpe of the journal's per-forecast P&L.
+
+    One row of ``pnl`` is what a position made over ``horizon`` sessions, not
+    over one. Annualising it at ``periods_per_year`` - the session count the
+    backtest uses, because a backtest's rows *are* sessions - scales the ratio
+    by ``sqrt(252)`` when the journal's own period is five days and only
+    ``sqrt(252 / 5)`` of them fit in a year. The error is a flat factor of
+    ``sqrt(horizon)``, it is always upward, and it lands on the one number in
+    this report that reads as risk-adjusted return: at the five-day horizon
+    this project runs, a Sharpe of 0.32 prints as 0.71.
+
+    So the rate is quoted per *holding period*: ``periods_per_year / horizon``,
+    read from the journal's own ``horizon`` column rather than from a config,
+    because the column is what the rows were actually recorded at.
+
+    A journal mixing horizons has no single period length and therefore no
+    single annualisation, so it returns ``nan`` rather than pick one - the same
+    bargain :func:`_annualised_turnover` takes when it cannot see the columns
+    it needs. ``ScoreResult`` is public and can be built from a frame that
+    never went through :func:`score_journal`, so a missing column is a real
+    case and not a bug.
+
+    Still a health check and not a tradable number, for a reason the scaling
+    does not fix: forecasts recorded daily against a multi-day horizon overlap,
+    so these rows are not independent draws and the ratio's standard error is
+    understated whatever it is divided by. This makes the point estimate mean
+    what it says; it does not make it precise.
+
+    >>> frame = pd.DataFrame({"pnl": [0.02, -0.01, 0.03, -0.02], "horizon": [5] * 4})
+    >>> round(_live_sharpe(frame), 4)
+    1.4912
+    >>> round(_live_sharpe(frame.assign(horizon=1)), 4)  # the same P&L read daily
+    3.3343
+    >>> frame["horizon"] = [5, 5, 10, 10]  # no single period to annualise over
+    >>> _live_sharpe(frame)
+    nan
+    """
+    if "pnl" not in scored.columns or "horizon" not in scored.columns:
+        return float("nan")
+    horizons = pd.to_numeric(scored["horizon"], errors="coerce").dropna().unique()
+    if len(horizons) != 1 or horizons[0] <= 0:
+        return float("nan")
+    return sharpe_ratio(
+        scored["pnl"].to_numpy(float), periods_per_year=periods_per_year / float(horizons[0])
+    )
 
 
 def _trading_calendar(universe: dict[str, pd.DataFrame]) -> pd.DatetimeIndex:
