@@ -255,9 +255,16 @@ def sharpe_ratio(
     returns: pd.Series | np.ndarray,
     *,
     risk_free_rate: float = 0.0,
-    periods_per_year: int = TRADING_DAYS_PER_YEAR,
+    periods_per_year: float = TRADING_DAYS_PER_YEAR,
 ) -> float:
-    """Annualised Sharpe ratio. ``risk_free_rate`` is an annual rate."""
+    """Annualised Sharpe ratio. ``risk_free_rate`` is an annual rate.
+
+    ``periods_per_year`` is how many periods of ``returns`` fit in a year, and
+    it is a float because that count is only an integer when one period is one
+    session. A series of ``h``-day holding-period returns has ``252 / h`` of
+    them in a year - 50.4 at a five-day horizon - and rounding that to an int
+    would quietly rescale the result.
+    """
     values = _as_array(returns)
     values = values[~np.isnan(values)]
     if len(values) < 2:

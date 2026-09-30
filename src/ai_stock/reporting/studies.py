@@ -1236,8 +1236,16 @@ def render_journal_report(
             "`live_ic` averages the per-symbol correlations, the same way `ic_fold_mean` "
             "averages per-fold ones. `live_ic_pooled` throws every symbol into one "
             "correlation and can carry the opposite sign - it is shown only for contrast.",
-            "`live_sharpe` is a health check, not a tradable number: with a multi-day "
-            "horizon the per-forecast returns overlap, so its standard error is understated.",
+            "`live_sharpe` is annualised over *holding periods*, not sessions: one row of "
+            "P&L is what a position made over `horizon` days, so there are `252 / horizon` "
+            "of them in a year - 50.4 at this project's five-day horizon, not 252. "
+            "Annualising per session instead multiplies the ratio by `sqrt(horizon)`, "
+            "always upward.",
+            "It is still a health check and not a tradable number, for a reason the scaling "
+            "does not fix: with a multi-day horizon the per-forecast returns overlap, so "
+            "its standard error is understated. It is also the Sharpe of one symbol's bet "
+            "at a time, not of a book holding all of them - every row counts equally, so "
+            "nothing here nets the positions held on the same day against each other.",
             "`live_annual_turnover` counts every recorded forecast, matured or not - a "
             "position pays for flipping the day it flips, not once its horizon elapses.",
             "`annual_turnover` is the same annualised traded-notional measure the backtest "

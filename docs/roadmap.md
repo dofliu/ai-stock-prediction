@@ -24,6 +24,52 @@ empty queue is a real answer, and a day that pushes nothing is a fine outcome.
 
 ## Done
 
+- [x] **Annualise the journal's Sharpe over holding periods, not sessions**
+  (`_live_sharpe`, `ScoreResult.metrics`, 2026-09-30). A defect found while
+  reading the day's journal report, not from the queue - the queue was empty.
+
+  `live_sharpe` divided the per-forecast P&L by its own standard deviation and
+  multiplied by `sqrt(252)`. That factor is the backtest's, and it is right
+  there: a backtest row is one session, so 252 of them fit in a year. A journal
+  row is not. It is what a position made over `horizon` sessions, and only
+  `252 / horizon` of those fit in a year - 50.4 at the five-day horizon this
+  project runs. The ratio was therefore scaled by `sqrt(horizon)`.
+
+  The error is a flat factor, it is always upward, and it lands on the one
+  number in the report that reads as risk-adjusted return. The 2026-09-30
+  report printed `live_sharpe 0.7086` against an honest 0.3169.
+
+  `sqrt(252)` is not a number a reader can check by inspection the way a
+  turnover can be multiplied out, and unlike `hit_rate_z` there is no second
+  estimate printed beside it to disagree. It had no test at all - the metric
+  was named in none, which is how a hard-coded 252 sat next to a
+  `periods_per_year` argument the project already had.
+
+  So the calculation is now `sharpe_ratio` from `evaluation.metrics`, the same
+  function the backtest uses, called with `periods_per_year = 252 / horizon`.
+  Re-implementing the arithmetic locally is how the two came to differ in the
+  first place; `sharpe_ratio`'s `periods_per_year` widened from `int` to
+  `float` because 50.4 is not an integer and rounding it would rescale the
+  answer. The horizon is read from the journal's `horizon` column rather than
+  from a config, because the column is what the rows were recorded at.
+
+  A journal mixing horizons returns `nan` rather than pick one of them.
+  `score_journal` does not filter by horizon - it scores whatever rows are on
+  disk, and `--model` does not narrow them - so a second horizon in the file is
+  a real case, not a malformed one. Everything else in the table still reports:
+  a mixed horizon makes the *rate* meaningless, not the P&L.
+
+  Two things this does not fix, now stated in the report rather than left to be
+  assumed. The overlap caveat still stands and is untouched by the scaling:
+  forecasts recorded daily against a multi-day horizon are not independent
+  draws, so the standard error is understated whatever the ratio is divided by.
+  And this is the Sharpe of one symbol's bet at a time, not of a book holding
+  all of them - every row counts equally and nothing nets same-day positions
+  against each other. Netting them is a real question and not a bug fix: the
+  journal's cross-section is unbalanced (2026-09-21 holds `MU` alone, 2026-09-07
+  holds the three Taiwan names without it), so an equal-weight date mean would
+  put a ninth of the weight on a single bet. That belongs in its own change.
+
 - [x] **Cut the journal's independence blocks on the market's calendar, not on
   the journal's rows** (`independent_blocks`, `ScoreResult.calendar`,
   2026-09-29). A defect found while reading the day's journal report, not from
