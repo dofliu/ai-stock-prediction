@@ -799,6 +799,17 @@ def _command_journal(args: argparse.Namespace) -> int:
             f" over {int(pooled['n_independent'])} independent horizon(s);"
             f" naive z = {format_number(pooled['hit_rate_z_naive'])})"
         )
+        # The IC is printed above with no sampling error of its own, and it is
+        # the headline number that moves most on a short journal. Quote it the
+        # same way the hit rate is quoted, or the two lines invite a comparison
+        # only one of them has earned.
+        lines.append(
+            f"vs backtest IC     claim {format_number(pooled['backtest_ic'])}"
+            f" -> live {format_number(pooled['live_ic'])}"
+            f"  (z = {format_number(pooled['ic_z'])}"
+            f" over {int(pooled['n_independent_ic'])} independent horizon(s);"
+            f" naive z = {format_number(pooled['ic_z_naive'])})"
+        )
     _echo("\n".join(lines), quiet=args.quiet)
 
     # Last, on purpose. Everything above has already been written and printed,

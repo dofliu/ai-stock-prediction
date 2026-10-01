@@ -66,6 +66,33 @@ def _correlation(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.corrcoef(a, b)[0, 1])
 
 
+def _ic_z(observed: float, claimed: float, trials: float) -> float:
+    """The live-versus-backtest IC gap in units of its own sampling error.
+
+    A correlation is not normally distributed and its standard error depends on
+    the correlation itself, so the gap cannot be divided by a constant the way
+    a proportion's can. Fisher's transform fixes both: ``atanh(r)`` is
+    approximately normal with standard error ``1 / sqrt(n - 3)``, whatever the
+    true correlation is, so the difference of two transformed ICs over that
+    standard error is a z-score on the same scale as ``hit_rate_z``.
+
+    ``NaN`` when it is undefined rather than a number that cannot be read:
+    fewer than four observations leaves no degrees of freedom (``n - 3 < 1``),
+    and ``atanh`` diverges at ``|r| = 1``, which is what a perfect correlation
+    on a handful of points looks like.
+
+    >>> round(_ic_z(0.5, 0.0, 28), 4)
+    2.7465
+    >>> _ic_z(0.9, 0.0, 3)
+    nan
+    """
+    if not (np.isfinite(observed) and np.isfinite(claimed)) or trials < 4:
+        return float("nan")
+    if abs(observed) >= 1.0 or abs(claimed) >= 1.0:
+        return float("nan")
+    return float((math.atanh(observed) - math.atanh(claimed)) * math.sqrt(trials - 3.0))
+
+
 def _decided(scored: pd.DataFrame) -> pd.DataFrame:
     """The rows that actually took a side.
 
@@ -908,23 +935,55 @@ def compare_with_backtest(
 
     With few scored forecasts both are close to zero *whatever* happens: read
     ``n_independent`` before either z.
+
+    ``ic_z`` and ``ic_z_naive`` do the same job for the information
+    coefficient, which until now was reported as a bare pair of numbers -
+    ``backtest_ic`` beside ``live_ic``, with nothing to say how much of the
+    difference is sampling noise. That omission is not harmless. The IC reads
+    the magnitude of the signal and not only its sign, so it moves far more
+    than a hit rate on the same handful of forecasts, and a live IC an order of
+    magnitude above the backtest's is what a dozen overlapping rows look like
+    when the model has no edge at all.
+
+    The two counts bracket the answer exactly as the hit-rate pair does, and
+    for the same reason, but the IC is counted over every matured forecast
+    rather than only the decided ones: a zero position cannot be right or
+    wrong, which is why the hit rate drops it, but its signal still carries a
+    correlation. Hence ``n_independent_ic`` alongside ``n_independent`` - the
+    two differ only when some forecast took no side.
+
+    How loose ``ic_z_naive`` is depends on what it was handed. Called for a
+    single symbol, ``live_ic`` is that symbol's own correlation and Fisher's
+    standard error applies to it directly, so the only exaggeration is the
+    overlap. Called for the whole universe, ``live_ic`` is an *average* of
+    per-symbol correlations, and counting every row of every symbol as an
+    independent point ignores that a single-sector universe moves together too.
     """
     metrics = live.metrics()
     decided = _decided(live.scored)
     n_decided = float(len(decided))
     n_independent = float(independent_blocks(decided, live.calendar))
+    # The IC keeps the rows the hit rate drops, so it gets its own block count
+    # rather than borrowing one cut over a smaller set of forecasts.
+    n_independent_ic = float(independent_blocks(live.scored, live.calendar))
     claimed = backtest_metrics.get("directional_accuracy", float("nan"))
     observed = metrics["hit_rate"]
+    claimed_ic = float(backtest_metrics.get("ic_fold_mean", float("nan")))
+    observed_ic = metrics["live_ic"]
 
     comparison = {
         "n_scored": metrics["n_scored"],
         "n_decided": n_decided,
         "n_independent": n_independent,
+        "n_independent_ic": n_independent_ic,
         "backtest_directional_accuracy": float(claimed),
         "live_hit_rate": float(observed),
         "hit_rate_gap": float(observed - claimed),
-        "backtest_ic": float(backtest_metrics.get("ic_fold_mean", float("nan"))),
-        "live_ic": metrics["live_ic"],
+        "backtest_ic": claimed_ic,
+        "live_ic": observed_ic,
+        "ic_gap": float(observed_ic - claimed_ic),
+        "ic_z_naive": _ic_z(observed_ic, claimed_ic, metrics["n_scored"]),
+        "ic_z": _ic_z(observed_ic, claimed_ic, n_independent_ic),
     }
 
     comparable = np.isfinite(claimed) and np.isfinite(observed) and 0.0 < claimed < 1.0
@@ -942,13 +1001,17 @@ ROLLING_COMPARISON_COLUMNS = (
     "n_scored",
     "n_decided",
     "n_independent",
+    "n_independent_ic",
     "backtest_directional_accuracy",
     "live_hit_rate",
     "hit_rate_gap",
     "backtest_ic",
     "live_ic",
+    "ic_gap",
     "hit_rate_z",
     "hit_rate_z_naive",
+    "ic_z",
+    "ic_z_naive",
 )
 
 
