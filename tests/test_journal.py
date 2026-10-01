@@ -589,6 +589,105 @@ def test_the_same_gap_grows_more_significant_with_more_forecasts() -> None:
     assert abs(large_comparison["hit_rate_z"]) > abs(small_comparison["hit_rate_z"]) * 5
 
 
+def _ic_scored(
+    n: int, *, horizon: int = 1, symbol: str = "AAA", seed: int = 0, perfect: bool = False
+) -> pd.DataFrame:
+    """A scored frame whose signal genuinely tracks the outcome.
+
+    `_fake_scored` holds the signal constant, which leaves the IC undefined -
+    fine for a hit rate, useless for a correlation.
+    """
+    rng = np.random.default_rng(seed)
+    realised = rng.normal(0.0, 0.01, n)
+    signal = realised if perfect else realised + rng.normal(0.0, 0.01, n)
+    frame = _fake_scored(n, [True] * n, horizon=horizon, symbol=symbol)
+    frame["signal"] = signal
+    frame["position"] = np.sign(signal)
+    frame["realised_return"] = realised
+    frame["pnl"] = frame["position"] * realised
+    return frame
+
+
+def _ic_result(scored: pd.DataFrame) -> ScoreResult:
+    return ScoreResult(scored=scored, pending=scored.iloc[:0], cost_bps=5.0)
+
+
+_IC_CLAIM = {"directional_accuracy": 0.5, "ic_fold_mean": 0.05}
+
+
+def test_the_ic_gap_is_quoted_against_its_own_sampling_error() -> None:
+    """`backtest_ic` and `live_ic` used to sit side by side with nothing between them."""
+    result = _ic_result(_ic_scored(40, horizon=1))
+    comparison = compare_with_backtest(result, _IC_CLAIM)
+
+    live_ic = result.metrics()["live_ic"]
+    assert comparison["ic_gap"] == pytest.approx(live_ic - 0.05)
+    # At a one-day horizon nothing overlaps, so both counts are the row count
+    # and the two z-scores have to agree.
+    assert comparison["n_independent_ic"] == 40
+    expected = (math.atanh(live_ic) - math.atanh(0.05)) * math.sqrt(40 - 3)
+    assert comparison["ic_z"] == pytest.approx(expected)
+    assert comparison["ic_z_naive"] == pytest.approx(expected)
+
+
+def test_overlap_shrinks_the_ic_z_the_row_count_overstates() -> None:
+    """The defect this closes: a live IC far above the backtest's, read off 40 rows
+    that are really 8 bets.
+    """
+    result = _ic_result(_ic_scored(40, horizon=5))
+    comparison = compare_with_backtest(result, _IC_CLAIM)
+
+    assert comparison["n_scored"] == 40
+    assert comparison["n_independent_ic"] == 8
+    # Both z-scores are the same gap over a different standard error, so their
+    # ratio is fixed by the counts alone - no correlation enters it.
+    assert comparison["ic_z"] == pytest.approx(
+        comparison["ic_z_naive"] * math.sqrt(8 - 3) / math.sqrt(40 - 3)
+    )
+    assert abs(comparison["ic_z"]) < abs(comparison["ic_z_naive"])
+
+
+def test_an_ic_on_fewer_than_four_independent_windows_has_no_z() -> None:
+    """Fisher's standard error needs `n - 3` degrees of freedom; three blocks have none."""
+    result = _ic_result(_ic_scored(12, horizon=5))
+    comparison = compare_with_backtest(result, _IC_CLAIM)
+
+    assert comparison["n_independent_ic"] == 3
+    assert np.isnan(comparison["ic_z"])
+    # The naive count still has room, which is exactly the number not to believe.
+    assert np.isfinite(comparison["ic_z_naive"])
+
+
+def test_a_perfect_ic_has_no_z_rather_than_an_infinite_one() -> None:
+    """`atanh` diverges at 1, and a perfect correlation is what a short journal shows."""
+    result = _ic_result(_ic_scored(20, perfect=True))
+    comparison = compare_with_backtest(result, _IC_CLAIM)
+
+    assert comparison["live_ic"] == pytest.approx(1.0)
+    assert np.isnan(comparison["ic_z"])
+    assert np.isnan(comparison["ic_z_naive"])
+
+
+def test_a_missing_backtest_ic_leaves_the_z_undefined_not_zero() -> None:
+    comparison = compare_with_backtest(_ic_result(_ic_scored(40)), {"directional_accuracy": 0.5})
+
+    assert np.isnan(comparison["backtest_ic"])
+    assert np.isnan(comparison["ic_z"])
+    assert np.isnan(comparison["ic_z_naive"])
+
+
+def test_the_ic_counts_forecasts_the_hit_rate_drops() -> None:
+    """A zero position is no trial for the hit rate, but its signal still correlates."""
+    scored = _ic_scored(6, horizon=1)
+    scored.loc[:2, "position"] = 0.0
+    comparison = compare_with_backtest(_ic_result(scored), _IC_CLAIM)
+
+    assert comparison["n_decided"] == 3
+    assert comparison["n_independent"] == 3
+    # The IC read all six, so it is not entitled to the hit rate's smaller count.
+    assert comparison["n_independent_ic"] == 6
+
+
 def test_comparison_without_scored_forecasts_yields_no_z(prices, journal_config) -> None:
     empty = score_journal(load_journal(Path("nope.csv")), prices, journal_config)
     comparison = compare_with_backtest(empty, {"directional_accuracy": 0.52})
@@ -596,8 +695,11 @@ def test_comparison_without_scored_forecasts_yields_no_z(prices, journal_config)
     assert comparison["n_scored"] == 0
     assert comparison["n_decided"] == 0
     assert comparison["n_independent"] == 0
+    assert comparison["n_independent_ic"] == 0
     assert np.isnan(comparison["hit_rate_z"])
     assert np.isnan(comparison["hit_rate_z_naive"])
+    assert np.isnan(comparison["ic_z"])
+    assert np.isnan(comparison["ic_z_naive"])
 
 
 # --------------------------------------------------------------------------- #
@@ -803,13 +905,17 @@ def test_rolling_comparison_is_empty_below_the_window() -> None:
         "n_scored",
         "n_decided",
         "n_independent",
+        "n_independent_ic",
         "backtest_directional_accuracy",
         "live_hit_rate",
         "hit_rate_gap",
         "backtest_ic",
         "live_ic",
+        "ic_gap",
         "hit_rate_z",
         "hit_rate_z_naive",
+        "ic_z",
+        "ic_z_naive",
     ]
 
 

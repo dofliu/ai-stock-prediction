@@ -24,6 +24,57 @@ empty queue is a real answer, and a day that pushes nothing is a fine outcome.
 
 ## Done
 
+- [x] **Quote the IC gap against its own sampling error, the way the hit rate
+  already is** (`_ic_z`, `compare_with_backtest`, 2026-10-01). A defect found
+  while reading the day's journal report, not from the queue - the queue was
+  empty.
+
+  The `Live vs. backtest` table printed `backtest_ic` and `live_ic` on adjacent
+  rows and stopped there. Putting two numbers in one table is an invitation to
+  compare them, and that comparison could not be made: nothing said how much of
+  the difference was sampling noise. `hit_rate` has had `hit_rate_z` and
+  `hit_rate_z_naive` since the beginning for exactly this reason. The IC had
+  neither, and it is the number that needs them more - it reads the magnitude
+  of the signal and not only its sign, so it swings far harder on the same few
+  forecasts.
+
+  The 2026-10-01 report showed what that costs. `live_ic 0.5750` against a
+  backtest `0.0054` reads as a hundredfold edge; `2337.TW` alone showed `0.7694`
+  against `0.0374`. At the row count those gaps are 3.56 and 2.19 sigma - a
+  reader would have concluded the live model was beating its backtest decisively.
+  At the independent-block count the pooled figure is 0.65 and the per-symbol
+  ones are not computable at all. There was no edge to see; there were 33
+  overlapping rows covering four non-overlapping horizons.
+
+  A proportion's standard error is $\sqrt{p(1-p)/n}$, but a correlation is
+  neither normal nor constant-variance, so the same division cannot be used.
+  Fisher's transform fixes both: `atanh(r)` is approximately normal with
+  standard error `1 / sqrt(n - 3)` whatever the true correlation is. `ic_z` and
+  `ic_z_naive` are that difference over that error, at the block count and the
+  row count respectively - the same bracket, on the same scale, as the hit-rate
+  pair, so the two can be read against each other.
+
+  `NaN` below four observations rather than a fabricated number: `n - 3` leaves
+  no degrees of freedom, and `atanh` diverges at `|r| = 1`, which is what a
+  perfect correlation on a handful of points looks like. With this journal's
+  block counts that `NaN` is most of the per-symbol row today, and it is the
+  honest reading - the alternative is a number that cannot be interpreted.
+
+  `n_independent_ic` is counted separately from `n_independent` rather than
+  reused, because the two cover different rows: a zero position is not a trial
+  the hit rate can score, but its signal still carries a correlation. They are
+  equal unless some forecast took no side, and reusing the smaller one would
+  have widened the IC's standard error for a reason that does not apply to it -
+  the same pull-toward-zero the 2026-09-29 entry calls the expensive direction.
+
+  What this does not fix: `live_ic` at the universe level is an average of
+  per-symbol correlations, while Fisher's standard error is that of a single
+  correlation over `n` points. For a single symbol the error applies directly
+  and only the overlap is unaccounted for; pooled, the cross-sectional
+  correlation is unaccounted for too. Both are stated in the report rather than
+  left to be assumed, and both only ever make `ic_z_naive` the looser end of
+  the bracket - which is already the end the report says not to believe.
+
 - [x] **Annualise the journal's Sharpe over holding periods, not sessions**
   (`_live_sharpe`, `ScoreResult.metrics`, 2026-09-30). A defect found while
   reading the day's journal report, not from the queue - the queue was empty.

@@ -1277,8 +1277,12 @@ def render_journal_report(
                         "hit_rate_gap",
                         "hit_rate_z",
                         "hit_rate_z_naive",
+                        "n_independent_ic",
                         "backtest_ic",
                         "live_ic",
+                        "ic_gap",
+                        "ic_z",
+                        "ic_z_naive",
                     ),
                     label="quantity",
                 )
@@ -1308,6 +1312,27 @@ def render_journal_report(
                 "converge as the journal lengthens; while they disagree, believe the smaller.",
                 "`n_decided` excludes forecasts that took no side - a zero position cannot be "
                 "right or wrong, so it is not a trial.",
+                "`ic_z` and `ic_z_naive` are the same bracket around the *information "
+                "coefficient*, which this table used to print as `backtest_ic` beside "
+                "`live_ic` and nothing else. Two numbers in one table invite a comparison, "
+                "and that one could not be made: the IC reads the size of the signal and "
+                "not only its sign, so it swings far more than a hit rate on the same few "
+                "forecasts, and a live IC an order of magnitude above the backtest's is "
+                "what a handful of overlapping rows look like when there is no edge at all.",
+                "They are computed through Fisher's transform, under which `atanh(ic)` has "
+                "a standard error of `1 / sqrt(n - 3)` whatever the true correlation is; "
+                "`NaN` means the count left no degrees of freedom (`n` under 4), which with "
+                "few independent windows is the honest reading rather than a failure.",
+                "`n_independent_ic` is the IC's own window count, and it is cut over every "
+                "matured forecast rather than only the decided ones: a zero position is not "
+                "a trial the hit rate can score, but its signal still carries a "
+                "correlation. It equals `n_independent` unless some forecast took no side.",
+                "In the columns above each `live_ic` is one symbol's own correlation, so "
+                "Fisher's standard error applies to it directly and `ic_z_naive` is loose "
+                "only by the overlap. The pooled figure the run summary prints is looser "
+                "still: there `live_ic` is an *average* of per-symbol correlations, and "
+                "counting every row of every symbol as an independent point ignores that a "
+                "single-sector universe moves together as well.",
                 "With few independent windows the z-score is near zero whatever happens. "
                 "Read `n_independent` first.",
             ]

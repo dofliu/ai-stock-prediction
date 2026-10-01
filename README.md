@@ -189,6 +189,13 @@ vs backtest        claim 50.55% -> live 56.48%  (z = 1.2337)
 > （後者列為 `live_ic_pooled` 僅供對照）。理由與 `ic_fold_mean` 相同：
 > 跨群體匯總會讓 between-group 的均值差異蓋過訊號，甚至翻轉符號。
 
+> **`live_ic` 要和 `ic_z` 一起讀，別和 `backtest_ic` 直接相減。** IC 讀的是
+> 訊號大小而不只是正負號，同樣那幾筆預測，它的擺動遠大於命中率；日誌還短的
+> 時候，`live_ic` 高出 `backtest_ic` 一個數量級是常態，而且不代表任何事。
+> `ic_z` / `ic_z_naive` 用 Fisher 轉換把這個差除以它自己的標準誤，和
+> `hit_rate_z` / `hit_rate_z_naive` 同一個尺度、同樣是上下界。獨立區塊少於
+> 四個時 `ic_z` 印 `NaN`——那是「還讀不得」，不是出錯。見 `docs/methodology.md` 7c 節。
+
 ### 自動化：GitHub Actions 每天抓真實行情
 
 `.github/workflows/daily-prices.yml` 每個交易日 22:00 UTC（美股收盤後，
