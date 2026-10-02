@@ -10,6 +10,7 @@ import pytest
 
 from ai_stock.data.loaders import (
     clamp_bar_extremes,
+    drop_unclosed_session,
     drop_untraded_rows,
     load_csv,
     save_csv,
@@ -216,3 +217,114 @@ def test_consistent_bars_are_returned_untouched(ohlcv: pd.DataFrame) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         assert clamp_bar_extremes(ohlcv, name="clean") is ohlcv
+
+
+def _bars(dates: list[str], volumes: list[int]) -> pd.DataFrame:
+    """A minimal valid OHLCV frame; only the index and volume matter here."""
+    return pd.DataFrame(
+        {
+            "open": [10.0] * len(dates),
+            "high": [11.0] * len(dates),
+            "low": [9.0] * len(dates),
+            "close": [10.5] * len(dates),
+            "volume": volumes,
+        },
+        index=pd.to_datetime(dates),
+    )
+
+
+class TestDropUnclosedSession:
+    """The bar for a session still trading is not a bar yet."""
+
+    def test_taiwan_bar_is_dropped_while_the_session_is_open(self) -> None:
+        # The real failure: a 22:00 UTC cron that landed at 01:25 UTC, 25
+        # minutes into the next Taipei session, and committed its first
+        # 1.3M shares as if they were the day's 15M.
+        frame = _bars(["2026-10-01", "2026-10-02"], [16_249_153, 1_346_000])
+
+        with pytest.warns(UserWarning, match="still trading"):
+            kept = drop_unclosed_session(
+                frame, "2337.TW", now=pd.Timestamp("2026-10-02 01:25", tz="UTC")
+            )
+
+        assert list(kept.index.strftime("%Y-%m-%d")) == ["2026-10-01"]
+
+    def test_the_same_bar_is_kept_once_taiwan_has_closed(self) -> None:
+        frame = _bars(["2026-10-01", "2026-10-02"], [16_249_153, 15_900_000])
+
+        # 05:30 UTC is 13:30 in Taipei: the close itself, not a minute after.
+        kept = drop_unclosed_session(
+            frame, "2337.TW", now=pd.Timestamp("2026-10-02 05:30", tz="UTC")
+        )
+
+        assert kept is frame
+
+    def test_us_bar_follows_new_york_hours_and_its_daylight_saving(self) -> None:
+        frame = _bars(["2026-06-30", "2026-07-01"], [31_103_200, 2_000_000])
+
+        # 19:59 UTC is 15:59 in New York on a summer date - still trading.
+        with pytest.warns(UserWarning, match="still trading"):
+            kept = drop_unclosed_session(
+                frame, "MU", now=pd.Timestamp("2026-07-01 19:59", tz="UTC")
+            )
+        assert list(kept.index.strftime("%Y-%m-%d")) == ["2026-06-30"]
+
+        # A minute later the bell has rung.
+        assert (
+            drop_unclosed_session(frame, "MU", now=pd.Timestamp("2026-07-01 20:00", tz="UTC"))
+            is frame
+        )
+
+    def test_a_winter_bar_needs_the_extra_hour_est_costs(self) -> None:
+        frame = _bars(["2026-01-05", "2026-01-06"], [31_103_200, 2_000_000])
+
+        # 20:00 UTC is 15:00 in New York in January: the summer rule would
+        # have let this one through.
+        with pytest.warns(UserWarning, match="still trading"):
+            kept = drop_unclosed_session(
+                frame, "MU", now=pd.Timestamp("2026-01-06 20:00", tz="UTC")
+            )
+        assert len(kept) == 1
+
+        assert (
+            drop_unclosed_session(frame, "MU", now=pd.Timestamp("2026-01-06 21:00", tz="UTC"))
+            is frame
+        )
+
+    def test_an_unknown_suffix_warns_and_keeps_the_data(self) -> None:
+        frame = _bars(["2026-10-01", "2026-10-02"], [100, 100])
+
+        with pytest.warns(UserWarning, match="EXCHANGE_SESSIONS"):
+            kept = drop_unclosed_session(
+                frame, "0700.HK", now=pd.Timestamp("2026-10-02 01:25", tz="UTC")
+            )
+
+        assert kept is frame
+
+    def test_a_naive_clock_is_read_as_utc(self) -> None:
+        frame = _bars(["2026-10-01", "2026-10-02"], [100, 100])
+
+        with pytest.warns(UserWarning, match="still trading"):
+            kept = drop_unclosed_session(frame, "2337.TW", now=pd.Timestamp("2026-10-02 01:25"))
+
+        assert len(kept) == 1
+
+    def test_an_empty_frame_is_returned_unchanged(self) -> None:
+        frame = _bars([], [])
+        assert drop_unclosed_session(frame, "2337.TW") is frame
+
+    def test_every_bar_in_the_future_is_a_clock_problem_and_raises(self) -> None:
+        frame = _bars(["2026-10-02"], [100])
+
+        with pytest.raises(ValueError, match="clock or a timezone problem"):
+            drop_unclosed_session(frame, "2337.TW", now=pd.Timestamp("2026-10-01 00:00", tz="UTC"))
+
+    def test_only_trailing_bars_are_dropped_not_a_hole_in_the_middle(self) -> None:
+        frame = _bars(["2026-09-30", "2026-10-01", "2026-10-02"], [100, 100, 100])
+
+        with pytest.warns(UserWarning, match="still trading"):
+            kept = drop_unclosed_session(
+                frame, "2337.TW", now=pd.Timestamp("2026-10-02 01:25", tz="UTC")
+            )
+
+        assert list(kept.index.strftime("%Y-%m-%d")) == ["2026-09-30", "2026-10-01"]

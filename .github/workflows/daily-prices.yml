@@ -3,6 +3,13 @@ name: Daily prices and forecast journal
 # 22:00 UTC on weekdays: after the US close (20:00-21:00 UTC) and therefore
 # after the Taiwan close (05:30 UTC) of the same trading day, so both markets
 # contribute the same date's bar.
+#
+# What this schedule cannot promise is when the job actually runs. GitHub's
+# scheduler drifts under load, and through 2026-09 the drift grew from minutes
+# to over three hours: run 33 onwards landed past 01:00 UTC, which is *inside*
+# the next Taipei session (01:00-05:30 UTC). So the download drops any bar for
+# a market still trading rather than trusting this line - see
+# `drop_unclosed_session` in src/ai_stock/data/loaders.py.
 on:
   schedule:
     - cron: "0 22 * * 1-5"

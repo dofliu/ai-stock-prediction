@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import warnings
+from datetime import time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -120,6 +122,109 @@ def clamp_bar_extremes(
     return repaired
 
 
+EXCHANGE_SESSIONS: dict[str, tuple[str, time]] = {
+    "": ("America/New_York", time(16, 0)),
+    "TW": ("Asia/Taipei", time(13, 30)),
+    "TWO": ("Asia/Taipei", time(13, 30)),
+}
+"""Regular close, by the Yahoo ticker suffix (``""`` is the unsuffixed US tape).
+
+Only the markets this project's universe actually lists. Adding a market means
+adding its hours here; an unknown suffix warns rather than guesses, because the
+guess that matters is the one in :func:`drop_unclosed_session`.
+"""
+
+
+def drop_unclosed_session(
+    frame: pd.DataFrame, ticker: str, *, now: pd.Timestamp | None = None, name: str = "data"
+) -> pd.DataFrame:
+    """Remove trailing bars whose trading session has not finished yet.
+
+    Asked for a daily history while a market is open, Yahoo answers with a bar
+    for the session in progress: the day's open, the high and low so far, the
+    *last trade* in the close column and a few minutes of volume. It is shaped
+    exactly like a finished bar and nothing in :func:`validate_ohlcv` can tell
+    them apart - the prices are positive and the body sits inside the extremes,
+    because it is a real bar, just not a whole one.
+
+    That matters here more than it would in a notebook. The daily job records a
+    forecast against the newest bar and writes its close into the forecast
+    journal, which is append-only by design: the next day's download silently
+    replaces the partial bar with the finished one, but the journal keeps the
+    mid-session price for ever and scores against it. On 2026-09-29 that cost
+    ``2337.TW`` a recorded entry of 116.50 against a true close of 118.50 -
+    1.7% of the price, on a five-day horizon whose whole edge is a tenth of
+    that.
+
+    The job is supposed to run after every close in the universe, and the
+    schedule is written to. What cannot be relied on is *being* run then:
+    GitHub's scheduler drifts under load, and a 22:00 UTC cron that lands at
+    01:25 UTC is a quarter of an hour into the next Taiwan session. So the
+    guarantee is taken here, where it can be checked, rather than assumed from
+    a cron line.
+
+    A bar is kept once the regular close of its own exchange has passed in real
+    time. Early closes are not modelled, which only ever delays a bar that was
+    already complete - the safe direction - and an unknown suffix warns and
+    keeps the data rather than inventing a calendar for it.
+
+    >>> frame = pd.DataFrame(
+    ...     {"open": [1.0, 1.0], "high": [1.0, 1.0], "low": [1.0, 1.0],
+    ...      "close": [1.0, 1.0], "volume": [10, 1]},
+    ...     index=pd.to_datetime(["2026-10-01", "2026-10-02"]),
+    ... )
+    >>> kept = drop_unclosed_session(
+    ...     frame, "2337.TW", now=pd.Timestamp("2026-10-02 01:25", tz="UTC")
+    ... )
+    >>> list(kept.index.strftime("%Y-%m-%d"))
+    ['2026-10-01']
+    """
+    if frame.empty:
+        return frame
+
+    suffix = ticker.rsplit(".", 1)[1].upper() if "." in ticker else ""
+    session = EXCHANGE_SESSIONS.get(suffix)
+    if session is None:
+        warnings.warn(
+            f"{name}: no session hours known for the {suffix!r} suffix of {ticker!r}, so a "
+            f"bar for a market still trading cannot be recognised - add it to "
+            f"EXCHANGE_SESSIONS",
+            UserWarning,
+            stacklevel=2,
+        )
+        return frame
+
+    zone, close_time = session
+    now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    now = now.tz_localize("UTC") if now.tzinfo is None else now.tz_convert("UTC")
+
+    closes = pd.DatetimeIndex(
+        [
+            pd.Timestamp.combine(day.date(), close_time)
+            .tz_localize(ZoneInfo(zone))
+            .tz_convert("UTC")
+            for day in frame.index
+        ]
+    )
+    kept = frame[closes <= now]
+
+    dropped = len(frame) - len(kept)
+    if not dropped:
+        return frame
+    if kept.empty:
+        raise ValueError(
+            f"{name}: every one of {len(frame)} bar(s) is dated at or after the next "
+            f"{zone} close - that is a clock or a timezone problem, not a live session"
+        )
+    warnings.warn(
+        f"{name}: dropped {dropped} bar(s) for a session still trading, "
+        f"latest {frame.index[-1].date()} (closes {close_time} {zone})",
+        UserWarning,
+        stacklevel=2,
+    )
+    return kept
+
+
 def validate_ohlcv(frame: pd.DataFrame, *, name: str = "data") -> pd.DataFrame:
     """Return ``frame`` if it is a well-formed OHLCV table, else raise.
 
@@ -207,11 +312,14 @@ def load_yfinance(
     period: str = "5y",
     interval: str = "1d",
     auto_adjust: bool = True,
+    now: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """Download OHLCV data via :mod:`yfinance` (an optional dependency).
 
-    Kept deliberately thin: it normalises column names, validates the result
-    and otherwise stays out of the way. Requires network access and
+    Kept deliberately thin: it normalises column names, drops any bar for a
+    session still trading (see :func:`drop_unclosed_session`), validates the
+    result and otherwise stays out of the way. ``now`` overrides the clock that
+    check reads, and exists so it can be tested. Requires network access and
     ``pip install yfinance``.
     """
     try:
@@ -241,6 +349,7 @@ def load_yfinance(
     frame.index.name = "date"
     frame = frame.sort_index()
     keep = [c for c in (*OHLCV_COLUMNS, "adj_close") if c in frame.columns]
-    frame = drop_untraded_rows(frame[keep], name=f"yfinance:{ticker}")
+    frame = drop_unclosed_session(frame[keep], ticker, now=now, name=f"yfinance:{ticker}")
+    frame = drop_untraded_rows(frame, name=f"yfinance:{ticker}")
     frame = clamp_bar_extremes(frame, name=f"yfinance:{ticker}")
     return validate_ohlcv(frame, name=f"yfinance:{ticker}")
