@@ -24,6 +24,50 @@ empty queue is a real answer, and a day that pushes nothing is a fine outcome.
 
 ## Done
 
+- [x] **Drop the bar for a session that is still trading** (`drop_unclosed_session`,
+  `load_yfinance`, 2026-10-02). A defect found while reading the day's journal
+  report, not from the queue - the queue was empty.
+
+  The `2026-10-02` bar for `2337.TW` arrived with 1,346,000 shares against a
+  typical 15-26 million, because the job that fetched it ran at 01:25 UTC and
+  the Taipei session had opened at 01:00. Yahoo answers a daily request during
+  a session with the session so far: the real open, the high and low to date,
+  the last trade in the `close` column, a few minutes of volume. Nothing in
+  `validate_ohlcv` can refuse it - the prices are positive and the body sits
+  inside the extremes, because it is a real bar, just not a whole one.
+
+  A partial bar in `data/prices` corrects itself the next morning. The damage
+  is downstream and does not: the same run records a forecast against that bar
+  and writes its close into `data/journal/forecasts.csv`, which is append-only
+  by design and is the one score in this project that cannot be tuned after the
+  fact. `2026-09-29` is already in the record at an entry of 116.50 for
+  `2337.TW` against a true close of 118.50 - 1.7% of the price, on a five-day
+  horizon whose whole claimed edge is a tenth of that, and on the wrong side of
+  a position the journal has since scored. Those rows stay as they are; the
+  rule against rewriting the record is worth more than four tidier rows.
+
+  The schedule was not wrong, and moving it would not have fixed this. The cron
+  is 22:00 UTC, after both closes, and the comment saying so was correct when
+  it was written. GitHub's scheduler simply drifted - minutes in 2026-09-08,
+  past 01:00 UTC from run 33 on - and a cron line is a request, not a
+  guarantee. So the guarantee now lives where it can be checked: a bar is kept
+  only once the regular close of its own exchange has passed in real time,
+  read from the ticker suffix (`.TW` -> 13:30 Asia/Taipei, unsuffixed ->
+  16:00 America/New_York, DST and all).
+
+  Early closes are not modelled. Treating a half-day as a full day only ever
+  holds back a bar that was already complete, costing that symbol one day's
+  forecast and showing up as one missed session in the freshness table - the
+  cheap direction, against a journal row that is wrong for ever. An unknown
+  ticker suffix warns and keeps the data rather than inventing a calendar for a
+  market nobody has checked; adding a market means adding its hours.
+
+  What this does not fix: `MU` runs a day behind regardless, because the US bar
+  is published with its own vendor lag, and that lag is why `MU` escaped the
+  defect entirely - its last bar was never the live one. The check also reads
+  the clock, not the tape, so a venue that halts for the day still has to wait
+  out its scheduled close.
+
 - [x] **Quote the IC gap against its own sampling error, the way the hit rate
   already is** (`_ic_z`, `compare_with_backtest`, 2026-10-01). A defect found
   while reading the day's journal report, not from the queue - the queue was
