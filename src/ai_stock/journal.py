@@ -26,7 +26,7 @@ import pandas as pd
 
 from ai_stock.backtest.engine import signal_to_positions, simple_returns, trailing_volatility
 from ai_stock.config import TRADING_DAYS_PER_YEAR, BacktestConfig, ExperimentConfig
-from ai_stock.data.loaders import validate_ohlcv
+from ai_stock.data.loaders import next_session_close, validate_ohlcv
 from ai_stock.evaluation.metrics import sharpe_ratio
 from ai_stock.features.builder import build_dataset, build_features
 from ai_stock.models.registry import create_model
@@ -39,6 +39,7 @@ __all__ = [
     "data_freshness",
     "independent_blocks",
     "load_journal",
+    "outcome_begun_symbols",
     "record_forecasts",
     "rolling_compare_with_backtest",
     "score_journal",
@@ -567,6 +568,58 @@ def data_freshness(
         )
     frame = pd.DataFrame(rows, columns=columns).set_index("symbol")
     return frame
+
+
+def outcome_begun_symbols(
+    universe: dict[str, pd.DataFrame], *, now: pd.Timestamp | None = None
+) -> list[str]:
+    """Symbols whose newest bar can no longer be forecast from, because its outcome started.
+
+    This module's whole claim is in its first line: a row is written before the
+    answer exists. :func:`record_forecasts` predicts from each symbol's newest
+    bar, and that is only a prediction while the session *after* that bar is
+    still ahead. Let the newest bar fall a session behind - a provider that
+    publishes late, a run that lands after the next close - and the row records
+    an entry at a close the market has already traded past, over an outcome
+    window whose first day is history. The model never saw it, so nothing here
+    is fitted on the future; what is lost is the guarantee, and the guarantee
+    is the only reason to keep a journal rather than a backtest.
+
+    That is not hypothetical in this repository. From 2026-09-23 the daily job
+    drifted past 01:00 UTC and `MU` arrived one US session behind every single
+    run, so ten of its journal rows were written after the first day of their
+    own five-day window had closed.
+
+    The test is per symbol and on its own exchange's clock, which matters in a
+    universe that spans two: at 06:00 UTC a Taipei bar for today is finished
+    and the New York session has not opened, and a single reference time would
+    call one of them wrong. A symbol whose market is not in
+    :data:`~ai_stock.data.loaders.EXCHANGE_SESSIONS` is never reported, because
+    the question cannot be answered for it - see
+    :func:`~ai_stock.data.loaders.next_session_close`.
+
+    >>> bars = pd.DataFrame(
+    ...     {"open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1]},
+    ...     index=pd.to_datetime(["2026-10-01"]),
+    ... )
+    >>> before = pd.Timestamp("2026-10-02 19:00", tz="UTC")  # New York still trading
+    >>> outcome_begun_symbols({"MU": bars}, now=before)
+    []
+    >>> outcome_begun_symbols({"MU": bars}, now=pd.Timestamp("2026-10-03 01:00", tz="UTC"))
+    ['MU']
+    """
+    now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    now = now.tz_localize("UTC") if now.tzinfo is None else now.tz_convert("UTC")
+
+    begun = []
+    for symbol in sorted(universe):
+        last_bar = _last_bar_date(universe[symbol])
+        if last_bar is None:
+            continue
+        next_close = next_session_close(symbol, last_bar)
+        if next_close is not None and next_close <= now:
+            begun.append(symbol)
+    return begun
 
 
 def stale_symbols(freshness: pd.DataFrame, *, older_than_days: float) -> list[str]:

@@ -24,6 +24,44 @@ empty queue is a real answer, and a day that pushes nothing is a fine outcome.
 
 ## Done
 
+- [x] **Withhold a forecast whose outcome window has already opened**
+  (`next_session_close`, `outcome_begun_symbols`, 2026-10-03). A defect found
+  while reading the day's journal report, not from the queue - the queue was
+  empty.
+
+  The sibling of the 2026-10-02 item, and the more serious of the two.
+  `drop_unclosed_session` refuses a bar whose session has not finished; nothing
+  refused a bar whose *next* session had.
+
+  `record_forecasts` predicts from each symbol's newest bar. That is a forecast
+  only while the session after that bar is still ahead. From 2026-09-23 the
+  daily job drifted past 01:00 UTC and `MU` arrived one US session behind the
+  three Taiwan symbols on every single run - the provider publishes the US bar
+  late and `drop_untraded_rows` correctly discards the empty row it sends in
+  the meantime, so the run on day `D` recorded `MU` from the close of `D-2`.
+  By then the `D-1` session had closed: the first day of that row's five-day
+  outcome was already history when the row was written.
+
+  The model never saw it, so nothing was fitted on the future and no number in
+  the journal is inflated. What was lost is the guarantee in this module's
+  first line - "recorded before the outcome existed" - which is the only reason
+  to keep a journal rather than a backtest. Ten `MU` rows in
+  `data/journal/forecasts.csv` were written that way. They stay as they are;
+  the record is not edited.
+
+  The test is per symbol and on its own exchange's clock, because the universe
+  spans two: at 06:00 UTC a Taipei bar for today is finished and New York has
+  not opened, and a single reference time would call one of them wrong. It
+  reuses `EXCHANGE_SESSIONS` and the same weekday-only, no-holiday-calendar
+  rule, which errs the same safe way - a market holiday costs that symbol one
+  forecast, against a journal row that is wrong for ever.
+
+  The cost is visible rather than silent: `MU` will get no row at all until its
+  bar arrives before the next close. A universe quietly shrinking from four
+  symbols to three is exactly what the report's new `Symbols withheld` line is
+  for, and it is the honest answer - a symbol whose feed cannot beat the next
+  session cannot be in a live journal.
+
 - [x] **Drop the bar for a session that is still trading** (`drop_unclosed_session`,
   `load_yfinance`, 2026-10-02). A defect found while reading the day's journal
   report, not from the queue - the queue was empty.

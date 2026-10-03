@@ -23,6 +23,7 @@ from ai_stock.journal import (
     data_freshness,
     independent_blocks,
     load_journal,
+    outcome_begun_symbols,
     record_forecasts,
     rolling_compare_with_backtest,
     score_journal,
@@ -1418,3 +1419,59 @@ def test_live_sharpe_is_nan_when_the_journal_mixes_horizons(tmp_path: Path, pric
 
     assert np.isnan(metrics["live_sharpe"])
     assert np.isfinite(metrics["total_pnl"])
+
+
+def _one_bar(date: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        {"open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1]},
+        index=pd.to_datetime([date]),
+    )
+
+
+class TestOutcomeBegunSymbols:
+    """A row is a forecast only while the first day of its outcome is still ahead."""
+
+    def test_a_current_bar_is_not_reported(self) -> None:
+        # 2026-10-02 19:00 UTC is 15:00 in New York: the session that would
+        # open this forecast's window has not finished.
+        assert (
+            outcome_begun_symbols(
+                {"MU": _one_bar("2026-10-01")}, now=pd.Timestamp("2026-10-02 19:00", tz="UTC")
+            )
+            == []
+        )
+
+    def test_the_mu_lag_that_prompted_this_is_reported(self) -> None:
+        # The real case: from 2026-09-23 the daily job drifted past 01:00 UTC
+        # and MU's newest bar was always the session before last, so its row
+        # was written after the first day of its own window had closed.
+        assert outcome_begun_symbols(
+            {"MU": _one_bar("2026-10-01")}, now=pd.Timestamp("2026-10-03 01:00", tz="UTC")
+        ) == ["MU"]
+
+    def test_each_market_is_judged_on_its_own_clock(self) -> None:
+        # 06:00 UTC: Taipei has closed for the day, New York has not opened.
+        # A single reference time would have to call one of these wrong.
+        universe = {"2337.TW": _one_bar("2026-10-01"), "MU": _one_bar("2026-10-01")}
+
+        assert outcome_begun_symbols(universe, now=pd.Timestamp("2026-10-02 06:00", tz="UTC")) == [
+            "2337.TW"
+        ]
+
+    def test_an_unknown_market_is_never_reported(self) -> None:
+        assert (
+            outcome_begun_symbols(
+                {"ABC.XX": _one_bar("2020-01-01")}, now=pd.Timestamp("2026-10-03 01:00", tz="UTC")
+            )
+            == []
+        )
+
+    def test_a_symbol_with_no_bars_is_left_to_record_forecasts_to_skip(self) -> None:
+        empty = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+        assert outcome_begun_symbols({"MU": empty}, now=pd.Timestamp("2026-10-03", tz="UTC")) == []
+
+    def test_a_naive_now_is_read_as_utc(self) -> None:
+        assert outcome_begun_symbols(
+            {"MU": _one_bar("2026-10-01")}, now=pd.Timestamp("2026-10-03 01:00")
+        ) == ["MU"]

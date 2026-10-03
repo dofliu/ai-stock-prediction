@@ -1138,6 +1138,7 @@ def render_journal_report(
     rolling: pd.DataFrame | None = None,
     recorded: int = 0,
     skipped: list[str] | None = None,
+    withheld: list[str] | None = None,
     freshness: pd.DataFrame | None = None,
 ) -> str:
     """Report what the live forecast journal says, against what was promised.
@@ -1148,6 +1149,11 @@ def render_journal_report(
     ``freshness`` is :func:`ai_stock.journal.data_freshness` over the same
     universe. It is rendered above the performance tables, because a stale feed
     makes every number below it describe a day that has already passed.
+
+    ``skipped`` and ``withheld`` are both symbols that got no row today, and
+    they are listed apart because only one of them is about this project's
+    honesty: ``skipped`` could not be fitted, ``withheld`` could have been and
+    was refused, because the session after its newest bar had already closed.
     """
     metrics = live.metrics()
     report = Report(
@@ -1168,6 +1174,8 @@ def render_journal_report(
             f"Forecasts recorded: {recorded}",
             "Symbols skipped (too little history to fit): "
             + (", ".join(f"`{s}`" for s in skipped) if skipped else "none"),
+            "Symbols withheld (outcome window already open): "
+            + (", ".join(f"`{s}`" for s in withheld) if withheld else "none"),
             f"Forecasts matured and scored: {int(metrics['n_scored'])}",
             f"Still in flight (horizon not elapsed): {int(metrics['n_pending'])}",
             f"Forecast horizon: {config.features.horizon} trading day(s)",
@@ -1194,6 +1202,11 @@ def render_journal_report(
         )
         report.bullets(
             [
+                "`behind?` is about the feed, not about today's row: a symbol one "
+                "session behind reads `no` here - one late bar is ordinary - and is "
+                "still withheld from the journal above, because a forecast made from a "
+                "bar the market has already traded past is not a forecast. The two "
+                "verdicts answer different questions and are allowed to disagree.",
                 "`sessions missed` is the weekdays that have closed since the symbol's "
                 "last bar, and it is what `behind?` reads. `age (days)` is calendar days "
                 "and is shown because it is what a reader wants to see, but it cannot "
