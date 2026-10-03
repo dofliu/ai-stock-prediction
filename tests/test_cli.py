@@ -292,6 +292,13 @@ def test_screen_without_a_source_exits_with_code_two(capsys) -> None:
 
 
 def _write_universe(folder: Path, *, n_days: int = 700) -> None:
+    """A two-symbol universe that ends in 2012 - a feed that has stopped.
+
+    Use it for the staleness paths only. `journal` withholds a forecast once
+    the session after a symbol's newest bar has closed, so this fixture records
+    nothing at all; a test that needs a row written wants
+    `_write_current_universe`.
+    """
     from dataclasses import replace as _replace
 
     from ai_stock.config import SyntheticConfig
@@ -305,7 +312,7 @@ def _write_universe(folder: Path, *, n_days: int = 700) -> None:
 
 def test_journal_records_then_scores(tmp_path: Path, capsys) -> None:
     folder = tmp_path / "prices"
-    _write_universe(folder)
+    _write_current_universe(folder)
     path = tmp_path / "journal" / "forecasts.csv"
 
     assert (
@@ -338,7 +345,7 @@ def test_journal_records_then_scores(tmp_path: Path, capsys) -> None:
 
 def test_journal_record_is_idempotent_on_unchanged_prices(tmp_path: Path) -> None:
     folder = tmp_path / "prices"
-    _write_universe(folder)
+    _write_current_universe(folder)
     path = tmp_path / "forecasts.csv"
     argv = [
         "journal",
@@ -361,11 +368,15 @@ def test_journal_record_is_idempotent_on_unchanged_prices(tmp_path: Path) -> Non
 
 def test_journal_skips_symbols_with_too_little_history(tmp_path: Path, capsys) -> None:
     folder = tmp_path / "prices"
-    _write_universe(folder)
+    _write_current_universe(folder)
     from ai_stock.data.loaders import save_csv
     from ai_stock.data.synthetic import generate_ohlcv
 
-    save_csv(generate_ohlcv(n_days=200, seed=9), folder / "SHORT.csv")
+    # Current dates, so the only reason SHORT gets no row is its history.
+    short = generate_ohlcv(n_days=200, seed=9)
+    short.index = pd.date_range(end=pd.Timestamp.today().normalize(), periods=len(short))
+    short.index.name = "date"
+    save_csv(short, folder / "SHORT.csv")
 
     assert (
         main(
@@ -385,6 +396,35 @@ def test_journal_skips_symbols_with_too_little_history(tmp_path: Path, capsys) -
         == 0
     )
     assert "skipped: SHORT" in capsys.readouterr().out
+
+
+def test_journal_withholds_a_symbol_whose_feed_fell_behind(tmp_path: Path, capsys) -> None:
+    """The `MU` case, end to end.
+
+    From 2026-09-23 the daily job drifted past 01:00 UTC and `MU` arrived one
+    US session behind the three Taiwan symbols every run. Nothing refused it:
+    a row went into the append-only journal at a close the market had already
+    traded past, over a five-day window whose first day was history. The rest
+    of the universe is current and must still be recorded - one late provider
+    cannot be allowed to stop the day.
+    """
+    folder = tmp_path / "prices"
+    _write_current_universe(folder)
+
+    from ai_stock.data.loaders import load_csv, save_csv
+
+    behind = load_csv(folder / "BBB.csv")
+    behind.index = behind.index - pd.Timedelta(days=10)
+    save_csv(behind, folder / "BBB.csv")
+
+    journal = tmp_path / "f.csv"
+    assert main(_journal_argv(folder, journal, "--out", str(tmp_path))) == 0
+
+    frame = pd.read_csv(journal)
+    assert set(frame["symbol"]) == {"AAA"}
+
+    report = (tmp_path / "journal_ridge.md").read_text(encoding="utf-8")
+    assert "Symbols withheld (outcome window already open): `BBB`" in report
 
 
 def test_journal_writes_a_report(tmp_path: Path) -> None:
@@ -532,6 +572,12 @@ def test_journal_fail_if_stale_still_writes_the_report(tmp_path: Path) -> None:
     that only works if the failing command has already produced its output. A
     stale-feed exit that skipped the report would throw away the run it was
     complaining about.
+
+    The journal file is the one thing a stopped feed does *not* leave behind,
+    and that is the point rather than a gap: every symbol's newest bar has been
+    overtaken by its own next session, so there is no forecast left to make.
+    The report has to say which symbols those were, or the run goes red with
+    nothing to read.
     """
     folder = tmp_path / "prices"
     _write_universe(folder)
@@ -543,7 +589,8 @@ def test_journal_fail_if_stale_still_writes_the_report(tmp_path: Path) -> None:
     assert code == 3
     report = (out / "journal_ridge.md").read_text(encoding="utf-8")
     assert report.startswith("# Forecast journal")
-    assert journal.exists(), "the day's forecast must be recorded before the alarm"
+    assert "Symbols withheld (outcome window already open): `AAA`, `BBB`" in report
+    assert not journal.exists()
 
 
 def test_journal_without_a_source_exits_with_code_two(capsys) -> None:

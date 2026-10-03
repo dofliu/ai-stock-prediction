@@ -39,6 +39,7 @@ from ai_stock.journal import (
     compare_with_backtest,
     data_freshness,
     load_journal,
+    outcome_begun_symbols,
     record_forecasts,
     rolling_compare_with_backtest,
     score_journal,
@@ -729,12 +730,17 @@ def _command_journal(args: argparse.Namespace) -> int:
 
     recorded: list = []
     skipped: list[str] = []
+    withheld: list[str] = []
     if not args.skip_record:
-        recorded = record_forecasts(
-            universe, args.model, config, min_train_rows=args.min_train_rows
-        )
+        # A forecast is only a forecast while its outcome is still ahead. A
+        # symbol whose feed has fallen a session behind would be written down
+        # against an entry the market has already traded past, and the journal
+        # is append-only: better no row than one the record cannot stand behind.
+        withheld = outcome_begun_symbols(universe)
+        fresh = {s: f for s, f in universe.items() if s not in withheld}
+        recorded = record_forecasts(fresh, args.model, config, min_train_rows=args.min_train_rows)
+        skipped = sorted(set(fresh) - {f.symbol for f in recorded})
         append_forecasts(args.journal, recorded)
-        skipped = sorted(set(universe) - {f.symbol for f in recorded})
 
     live = score_journal(load_journal(args.journal), universe, config)
     freshness = data_freshness(universe)
@@ -770,6 +776,7 @@ def _command_journal(args: argparse.Namespace) -> int:
             rolling=rolling,
             recorded=len(recorded),
             skipped=skipped,
+            withheld=withheld,
             freshness=freshness,
         )
         _write(args.out / f"journal_{args.model}.md", report)
@@ -782,7 +789,8 @@ def _command_journal(args: argparse.Namespace) -> int:
         f"journal            {args.journal}",
         f"data as of         {_freshness_line(freshness)}",
         f"recorded today     {len(recorded)}"
-        + (f"  (skipped: {', '.join(skipped)})" if skipped else ""),
+        + (f"  (skipped: {', '.join(skipped)})" if skipped else "")
+        + (f"  (withheld, outcome open: {', '.join(withheld)})" if withheld else ""),
         f"scored / pending   {int(metrics['n_scored'])} / {int(metrics['n_pending'])}",
         f"live hit rate      {format_number(metrics['hit_rate'], percent=True)}",
         f"live IC            {format_number(metrics['live_ic'])}",

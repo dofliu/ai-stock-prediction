@@ -225,6 +225,46 @@ def drop_unclosed_session(
     return kept
 
 
+def next_session_close(ticker: str, bar_date: pd.Timestamp | str) -> pd.Timestamp | None:
+    """When the session *after* ``bar_date`` closes on ``ticker``'s own exchange, in UTC.
+
+    The companion to :func:`drop_unclosed_session`. That one asks whether a bar
+    is finished; this one asks whether the *next* bar is, which is the question
+    a forecast journal has to answer before it writes a row down. A forecast
+    made from the ``bar_date`` close is scored over the sessions that follow
+    it, so once this instant has passed the first day of that outcome already
+    exists - and a row written then is no longer a prediction.
+
+    Weekdays only, and no holiday calendar, for the reason
+    :data:`EXCHANGE_SESSIONS` gives: a closure makes this return a moment that
+    has already passed when the market was in fact shut, which costs a
+    forecast. The error in the other direction costs the journal's one
+    guarantee, so this is the side to be wrong on.
+
+    ``None`` means the suffix is not in :data:`EXCHANGE_SESSIONS` and the
+    question cannot be answered; the caller decides what to do with that.
+    :func:`drop_unclosed_session` already warns about such a ticker on the
+    download path, so this stays quiet rather than warning twice per run.
+
+    >>> next_session_close("2337.TW", "2026-10-01")  # Taipei closes 13:30
+    Timestamp('2026-10-02 05:30:00+0000', tz='UTC')
+    >>> next_session_close("MU", "2026-10-02")  # Friday bar -> Monday's close
+    Timestamp('2026-10-05 20:00:00+0000', tz='UTC')
+    >>> next_session_close("X.XX", "2026-10-02") is None
+    True
+    """
+    suffix = ticker.rsplit(".", 1)[1].upper() if "." in ticker else ""
+    session = EXCHANGE_SESSIONS.get(suffix)
+    if session is None:
+        return None
+
+    zone, close_time = session
+    day = pd.Timestamp(bar_date).normalize() + pd.offsets.BDay(1)
+    return (
+        pd.Timestamp.combine(day.date(), close_time).tz_localize(ZoneInfo(zone)).tz_convert("UTC")
+    )
+
+
 def validate_ohlcv(frame: pd.DataFrame, *, name: str = "data") -> pd.DataFrame:
     """Return ``frame`` if it is a well-formed OHLCV table, else raise.
 

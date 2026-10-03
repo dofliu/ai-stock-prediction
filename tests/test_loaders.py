@@ -13,6 +13,7 @@ from ai_stock.data.loaders import (
     drop_unclosed_session,
     drop_untraded_rows,
     load_csv,
+    next_session_close,
     save_csv,
     validate_ohlcv,
 )
@@ -328,3 +329,27 @@ class TestDropUnclosedSession:
             )
 
         assert list(kept.index.strftime("%Y-%m-%d")) == ["2026-09-30", "2026-10-01"]
+
+
+class TestNextSessionClose:
+    """When the session after a bar closes - the instant a forecast stops being one."""
+
+    def test_taipei_closes_at_half_past_one_in_the_afternoon(self) -> None:
+        assert next_session_close("2337.TW", "2026-10-01") == pd.Timestamp(
+            "2026-10-02 05:30", tz="UTC"
+        )
+
+    def test_a_friday_bar_points_at_mondays_close_not_saturdays(self) -> None:
+        # The weekend is the case a naive "+1 day" gets wrong, and it gets it
+        # wrong in the expensive direction: it would declare Saturday's close
+        # passed and withhold every Monday forecast in the universe.
+        assert next_session_close("MU", "2026-10-02") == pd.Timestamp("2026-10-05 20:00", tz="UTC")
+
+    def test_new_york_hours_carry_their_own_daylight_saving(self) -> None:
+        assert next_session_close("MU", "2026-06-30") == pd.Timestamp("2026-07-01 20:00", tz="UTC")
+        assert next_session_close("MU", "2026-01-05") == pd.Timestamp("2026-01-06 21:00", tz="UTC")
+
+    def test_an_unknown_market_answers_none_rather_than_guessing(self) -> None:
+        # Quietly: drop_unclosed_session already warns about this ticker on the
+        # download path, and warning twice a run trains the reader to skip it.
+        assert next_session_close("ABC.XX", "2026-10-02") is None
