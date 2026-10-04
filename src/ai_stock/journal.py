@@ -32,9 +32,11 @@ from ai_stock.features.builder import build_dataset, build_features
 from ai_stock.models.registry import create_model
 
 __all__ = [
+    "ALWAYS_LONG_COLUMNS",
     "Forecast",
     "ScoreResult",
     "append_forecasts",
+    "compare_with_always_long",
     "compare_with_backtest",
     "data_freshness",
     "independent_blocks",
@@ -1047,6 +1049,140 @@ def compare_with_backtest(
         else:
             comparison[key] = float("nan")
     return comparison
+
+
+ALWAYS_LONG_COLUMNS = (
+    "n_decided",
+    "live_hit_rate",
+    "always_long_hit_rate",
+    "hit_rate_gap",
+    "n_short",
+    "n_discordant",
+    "n_independent_discordant",
+    "skill_z",
+    "skill_z_naive",
+    "live_pnl",
+    "always_long_pnl",
+    "pnl_gap",
+)
+"""Keys :func:`compare_with_always_long` returns, in reporting order."""
+
+
+def compare_with_always_long(live: ScoreResult) -> dict[str, float]:
+    """Measure the journal against the one benchmark a backtest cannot supply.
+
+    :func:`compare_with_backtest` asks whether the live record matches what was
+    promised. It cannot ask the question a reader actually cares about: whether
+    the model beat doing nothing clever. Those come apart badly in a rising
+    market. A hit rate of 53.66% over a backtest claiming 50% reads as a model
+    holding up - and on the very same 41 forecasts, a book that was simply long
+    every day scored 60.98%. The model was not beating the market; it was
+    failing to be as long as it.
+
+    So this is the no-skill benchmark: the same rows, the same outcomes, a
+    position of ``+1`` throughout. The comparison is *paired* - both sides
+    score the identical forecasts - which makes it far sharper than putting two
+    independent hit rates side by side, and it collapses to something a reader
+    can check by hand. On a row where the model is long the two agree by
+    construction. Every row they can possibly disagree on is a row the model
+    went short. The model's entire claim to skill is its short calls, and
+    ``n_discordant`` is how many it has made.
+
+    ``skill_z`` is therefore McNemar's statistic over exactly those rows:
+    ``(b - c) / sqrt(b + c)``, where ``b`` is the discordant rows the model won
+    and ``c`` the ones always-long won. A short that was right is evidence of
+    skill, a short that was wrong is evidence against it, and the rows where
+    both were long carry no information about the difference at all - counting
+    them would only dilute the test toward zero.
+
+    ``skill_z`` and ``skill_z_naive`` bracket the answer the same way
+    ``hit_rate_z`` and ``hit_rate_z_naive`` do, for the same reason: consecutive
+    shorts in one symbol share most of an outcome window. The naive figure is at
+    the discordant-row count and the headline at
+    :func:`independent_blocks` over those rows. Believe the smaller while they
+    disagree.
+
+    The P&L pair is not paired-tested and is reported for contrast, because it
+    can point the other way and did: the live book is ``+4.6%`` against
+    always-long's ``-2.2%``, on a hit rate seven points *worse*. A few large
+    correct shorts against many small wrong ones is a real thing for a strategy
+    to be, and a hit rate alone will not show it. The benchmark pays no costs -
+    it trades once and holds - while the live P&L is net of them, which
+    flatters the benchmark; that is the direction to err in when the question
+    is whether the model earned its keep.
+
+    ``NaN`` where the comparison does not exist rather than a number that
+    cannot be read: a journal whose model never went short has nothing to test,
+    and says so with ``n_discordant`` of zero.
+
+    >>> scored = pd.DataFrame(
+    ...     {
+    ...         "asof_date": pd.to_datetime(["2024-01-01", "2024-01-08", "2024-01-15"]),
+    ...         "horizon": [5, 5, 5],
+    ...         "position": [1.0, -1.0, 1.0],
+    ...         "realised_return": [0.02, -0.03, -0.01],
+    ...         "pnl": [0.02, 0.03, -0.01],
+    ...     }
+    ... )
+    >>> result = compare_with_always_long(ScoreResult(scored, scored.iloc[:0], 0.0))
+    >>> round(result["always_long_hit_rate"], 4), round(result["live_hit_rate"], 4)
+    (0.3333, 0.6667)
+
+    The two long rows agree by construction, so only the short one is a trial:
+
+    >>> int(result["n_short"]), int(result["n_discordant"])
+    (1, 1)
+    >>> round(result["skill_z_naive"], 4)
+    1.0
+
+    A journal that never went short has nothing to test, and says so:
+
+    >>> flat = compare_with_always_long(
+    ...     ScoreResult(scored.assign(position=1.0), scored.iloc[:0], 0.0)
+    ... )
+    >>> int(flat["n_discordant"]), flat["skill_z"]
+    (0, nan)
+    """
+    empty = dict.fromkeys(ALWAYS_LONG_COLUMNS, float("nan"))
+    decided = _decided(live.scored)
+    if decided.empty:
+        empty["n_decided"] = 0.0
+        empty["n_short"] = 0.0
+        empty["n_discordant"] = 0.0
+        empty["n_independent_discordant"] = 0.0
+        return empty
+
+    position = decided["position"].to_numpy(float)
+    realised = decided["realised_return"].to_numpy(float)
+    model_hit = np.sign(position) == np.sign(realised)
+    long_hit = realised > 0.0
+
+    wins = model_hit & ~long_hit
+    losses = ~model_hit & long_hit
+    b, c = float(wins.sum()), float(losses.sum())
+    discordant = b + c
+    n_independent = float(independent_blocks(decided[wins | losses], live.calendar))
+
+    live_pnl = float(live.scored["pnl"].sum()) if "pnl" in live.scored.columns else float("nan")
+    always_long_pnl = float(live.scored["realised_return"].sum())
+
+    gap_rate = (b - c) / discordant if discordant > 0 else float("nan")
+    return {
+        "n_decided": float(len(decided)),
+        "live_hit_rate": float(np.mean(model_hit)),
+        "always_long_hit_rate": float(np.mean(long_hit)),
+        "hit_rate_gap": float(np.mean(model_hit) - np.mean(long_hit)),
+        "n_short": float((position < 0.0).sum()),
+        "n_discordant": discordant,
+        "n_independent_discordant": n_independent,
+        "skill_z": float(gap_rate * math.sqrt(n_independent)) if discordant > 0 else float("nan"),
+        "skill_z_naive": float(gap_rate * math.sqrt(discordant))
+        if discordant > 0
+        else float("nan"),
+        "live_pnl": live_pnl,
+        "always_long_pnl": always_long_pnl,
+        "pnl_gap": live_pnl - always_long_pnl,
+    }
 
 
 ROLLING_COMPARISON_COLUMNS = (

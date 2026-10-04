@@ -24,6 +24,61 @@ empty queue is a real answer, and a day that pushes nothing is a fine outcome.
 
 ## Done
 
+- [x] **Score the journal against always-long, the benchmark a backtest cannot
+  supply** (`compare_with_always_long`, 2026-10-04). A gap found while reading
+  the day's journal report, not from the queue - the queue was empty.
+
+  The report could say whether the live record matched its backtest. It could
+  not say whether the model beat doing nothing clever, and in a rising market
+  those are different questions with different answers. The 2026-10-04 report
+  is the case in point: 41 matured forecasts, a live hit rate of 53.66% against
+  a backtest claiming 50.00%, `hit_rate_z = +0.15` - a record that reads as
+  holding up. On the identical 41 rows, a book that was simply long every day
+  scored **60.98%**. The model was not beating the market; it was failing to be
+  as long as it, and nothing in the report said so.
+
+  The benchmark is the same rows, the same outcomes, a position of `+1`
+  throughout, which makes the comparison *paired* and collapses it to something
+  a reader can check by hand. On a row where the model is long the two books
+  hold the same position and are right or wrong together. Every row they can
+  possibly disagree on is a row the model went short: the model's entire claim
+  to skill is its short calls, and `n_discordant` is how many it has made. Here
+  that is 11 of 41, of which 4 were right.
+
+  `skill_z` is therefore McNemar's statistic over exactly those rows,
+  `(b - c) / sqrt(b + c)`. The rows both books got right carry no information
+  about the difference between them, and counting them only pulls the test
+  toward zero - the unpaired hit-rate gap of -7.3 points is diluted by 30 rows
+  that were never evidence. Overlap applies here as everywhere else in this
+  module, so `skill_z` and `skill_z_naive` bracket it the way `hit_rate_z` and
+  `hit_rate_z_naive` do: the naive figure at the discordant-row count, the
+  headline at `independent_blocks` cut over those same rows. Today that is
+  -0.90 and -0.47 - not significant, which is the honest reading at 11 short
+  calls, and now at least visible.
+
+  The P&L pair is deliberately not paired-tested, because it points the other
+  way and that is the reason it is there: `+4.6%` live against `-2.2%`
+  always-long, on a hit rate seven points worse. A few large correct shorts
+  against many small wrong ones is a real thing for a strategy to be, and a hit
+  rate alone will not show it. The benchmark pays no costs - it trades once and
+  holds - while the live P&L is net of them, which flatters the benchmark; that
+  is the direction to err in when the question is whether the model earned its
+  keep.
+
+  Computed unconditionally rather than under `--no-compare`, because it needs
+  no backtest and no refit: the question "did this beat doing nothing" should
+  not go unanswered because a different comparison was switched off. It is
+  rendered above the backtest tables for the same reason - a reader who stops
+  after one table should have read the one that asks whether the model beat
+  doing nothing, not the one that asks whether it matched a number this project
+  chose for itself.
+
+  What this does not fix: always-long is the right null for a directional
+  strategy on this universe, and it is still only one null. It says nothing
+  about risk taken to earn the difference, and the P&L comparison is a raw
+  difference with no sampling error attached - the journal is far too short for
+  one to mean anything.
+
 - [x] **Withhold a forecast whose outcome window has already opened**
   (`next_session_close`, `outcome_begun_symbols`, 2026-10-03). A defect found
   while reading the day's journal report, not from the queue - the queue was

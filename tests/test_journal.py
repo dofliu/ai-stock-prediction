@@ -19,6 +19,7 @@ from ai_stock.journal import (
     Forecast,
     ScoreResult,
     append_forecasts,
+    compare_with_always_long,
     compare_with_backtest,
     data_freshness,
     independent_blocks,
@@ -1475,3 +1476,128 @@ class TestOutcomeBegunSymbols:
         assert outcome_begun_symbols(
             {"MU": _one_bar("2026-10-01")}, now=pd.Timestamp("2026-10-03 01:00")
         ) == ["MU"]
+
+
+# --------------------------------------------------------------------------- #
+# The no-skill benchmark
+# --------------------------------------------------------------------------- #
+def _long_short_scored(positions: list[float], realised: list[float]) -> pd.DataFrame:
+    """A scored frame with chosen positions against chosen outcomes."""
+    frame = _fake_scored(len(positions), [True] * len(positions), horizon=1)
+    frame["position"] = np.asarray(positions, dtype=float)
+    frame["signal"] = frame["position"]
+    frame["realised_return"] = np.asarray(realised, dtype=float)
+    frame["pnl"] = frame["position"] * frame["realised_return"]
+    return frame
+
+
+def _benchmark(positions: list[float], realised: list[float]) -> dict[str, float]:
+    scored = _long_short_scored(positions, realised)
+    return compare_with_always_long(ScoreResult(scored=scored, pending=scored.iloc[:0], cost_bps=0))
+
+
+class TestAlwaysLongBenchmark:
+    """What a rising market does to a hit rate, and what the paired test does about it."""
+
+    def test_a_hit_rate_above_the_backtest_can_be_below_always_long(self) -> None:
+        """The reason this comparison exists: 60% beats a 50% claim and loses to the market."""
+        # Eight up windows and two down ones. The model is long on four of the
+        # ups, short on the other four, and short on both downs: six right out
+        # of ten, against a benchmark that scores eight for holding still.
+        result = _benchmark(
+            [1.0] * 4 + [-1.0] * 4 + [-1.0] * 2,
+            [0.01] * 8 + [-0.01] * 2,
+        )
+
+        assert result["live_hit_rate"] == pytest.approx(0.6)  # beats a 0.5 backtest claim
+        assert result["always_long_hit_rate"] == pytest.approx(0.8)
+        assert result["hit_rate_gap"] == pytest.approx(-0.2)
+        assert result["skill_z_naive"] == pytest.approx((2.0 - 4.0) / math.sqrt(6.0))
+
+    def test_only_the_short_rows_can_disagree(self) -> None:
+        """A long row holds the benchmark's own position, so it carries no evidence."""
+        result = _benchmark([1.0, 1.0, 1.0, -1.0], [0.01, -0.01, 0.01, -0.01])
+
+        assert result["n_decided"] == 4.0
+        assert result["n_short"] == 1.0
+        assert result["n_discordant"] == 1.0
+
+    def test_a_book_that_never_shorts_has_nothing_to_test(self) -> None:
+        result = _benchmark([1.0] * 5, [0.01, -0.01, 0.01, 0.01, -0.01])
+
+        assert result["n_discordant"] == 0.0
+        assert result["hit_rate_gap"] == pytest.approx(0.0)
+        assert math.isnan(result["skill_z"])
+        assert math.isnan(result["skill_z_naive"])
+
+    def test_right_shorts_score_positive_and_wrong_ones_negative(self) -> None:
+        good = _benchmark([-1.0] * 4, [-0.01] * 4)
+        bad = _benchmark([-1.0] * 4, [0.01] * 4)
+
+        assert good["skill_z_naive"] == pytest.approx(2.0)
+        assert bad["skill_z_naive"] == pytest.approx(-2.0)
+
+    def test_the_concordant_rows_do_not_dilute_the_test(self) -> None:
+        """McNemar's point: rows both books got right say nothing about the difference."""
+        short_only = _benchmark([-1.0] * 4, [-0.01] * 4)
+        padded = _benchmark([-1.0] * 4 + [1.0] * 40, [-0.01] * 4 + [0.01] * 40)
+
+        assert padded["skill_z_naive"] == pytest.approx(short_only["skill_z_naive"])
+        # The unpaired hit rates do move, which is exactly why they are not the test.
+        # The unpaired gap is diluted by them - 1.00 washed down to 0.09 by
+        # rows on which the two books held the same position.
+        assert padded["hit_rate_gap"] < short_only["hit_rate_gap"]
+        assert padded["hit_rate_gap"] == pytest.approx(4.0 / 44.0)
+
+    def test_the_block_count_is_cut_over_the_discordant_rows_only(self) -> None:
+        """Consecutive shorts share an outcome window, so the naive z overstates."""
+        scored = _long_short_scored([-1.0] * 10, [-0.01] * 10)
+        scored["horizon"] = 5
+        result = compare_with_always_long(
+            ScoreResult(scored=scored, pending=scored.iloc[:0], cost_bps=0)
+        )
+
+        assert result["n_discordant"] == 10.0
+        assert result["n_independent_discordant"] == 2.0
+        assert result["skill_z"] == pytest.approx(math.sqrt(2.0))
+        assert result["skill_z_naive"] == pytest.approx(math.sqrt(10.0))
+        assert abs(result["skill_z"]) < abs(result["skill_z_naive"])
+
+    def test_pnl_can_point_the_other_way_from_the_hit_rate(self) -> None:
+        """One large correct short against three small wrong ones."""
+        result = _benchmark([-1.0] * 4, [0.01, 0.01, 0.01, -0.20])
+
+        assert result["hit_rate_gap"] < 0
+        assert result["skill_z_naive"] == pytest.approx(-1.0)
+        assert result["always_long_pnl"] == pytest.approx(-0.17)
+        assert result["live_pnl"] == pytest.approx(0.17)
+        assert result["pnl_gap"] > 0
+
+    def test_an_undecided_row_is_not_a_trial_for_either_book(self) -> None:
+        """The two hit rates must be measured on the same rows or the gap is not paired."""
+        result = _benchmark([0.0, 1.0, -1.0], [0.01, 0.01, -0.01])
+
+        assert result["n_decided"] == 2.0
+        assert result["live_hit_rate"] == pytest.approx(1.0)
+        assert result["always_long_hit_rate"] == pytest.approx(0.5)
+
+    def test_an_empty_journal_reports_counts_not_nans(self) -> None:
+        scored = _long_short_scored([1.0], [0.01]).iloc[:0]
+        result = compare_with_always_long(ScoreResult(scored=scored, pending=scored, cost_bps=0))
+
+        assert result["n_decided"] == 0.0
+        assert result["n_discordant"] == 0.0
+        assert math.isnan(result["live_hit_rate"])
+        assert math.isnan(result["skill_z"])
+
+    def test_the_live_pnl_matches_the_headline_metric(
+        self, daily_journal: Path, prices, journal_config
+    ) -> None:
+        """Both books are summed over the same rows - the live one net of costs."""
+        live = score_journal(load_journal(daily_journal), prices, journal_config)
+        result = compare_with_always_long(live)
+
+        assert result["live_pnl"] == pytest.approx(live.metrics()["total_pnl"])
+        assert result["pnl_gap"] == pytest.approx(result["live_pnl"] - result["always_long_pnl"])
+        # The benchmark pays nothing, so it is the gross sum of the same outcomes.
+        assert result["always_long_pnl"] == pytest.approx(live.scored["realised_return"].sum())

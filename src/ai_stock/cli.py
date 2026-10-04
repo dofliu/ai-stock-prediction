@@ -36,6 +36,7 @@ from ai_stock.journal import (
     MIN_TRAIN_ROWS,
     STALE_AFTER_DAYS,
     append_forecasts,
+    compare_with_always_long,
     compare_with_backtest,
     data_freshness,
     load_journal,
@@ -715,6 +716,11 @@ def _command_screen(args: argparse.Namespace) -> int:
     return 0
 
 
+def _has_benchmark(always_long: dict[str, float]) -> bool:
+    """Whether the always-long comparison has any forecast to score."""
+    return bool(np.isfinite(always_long.get("always_long_hit_rate", float("nan"))))
+
+
 def _command_journal(args: argparse.Namespace) -> int:
     config = _experiment_config(args)
     tickers = [t.strip() for t in (args.tickers or "").split(",") if t.strip()]
@@ -744,6 +750,10 @@ def _command_journal(args: argparse.Namespace) -> int:
 
     live = score_journal(load_journal(args.journal), universe, config)
     freshness = data_freshness(universe)
+    # Needs no backtest and no model refit, so it is computed unconditionally:
+    # the question "did this beat doing nothing" should not go unanswered
+    # because `--no-compare` switched off a different comparison.
+    always_long = compare_with_always_long(live)
 
     comparisons: dict[str, dict[str, float]] = {}
     rolling = None
@@ -778,6 +788,9 @@ def _command_journal(args: argparse.Namespace) -> int:
             skipped=skipped,
             withheld=withheld,
             freshness=freshness,
+            # Omitted rather than rendered as a table of NaNs when no forecast
+            # has taken a side: there is no benchmark comparison to show.
+            always_long=always_long if _has_benchmark(always_long) else None,
         )
         _write(args.out / f"journal_{args.model}.md", report)
         if not live.scored.empty:
@@ -797,6 +810,19 @@ def _command_journal(args: argparse.Namespace) -> int:
         f"total P&L          {format_number(metrics['total_pnl'], percent=True)}",
         f"annual turnover    {format_number(metrics['annual_turnover'])}",
     ]
+    # Before the backtest lines, because it is the comparison a reader who
+    # stops reading here most needs: a hit rate over 50% in a market that rose
+    # on 61% of these windows is not an edge, and only this line says so.
+    if _has_benchmark(always_long):
+        lines.append(
+            f"vs always long     always long "
+            f"{format_number(always_long['always_long_hit_rate'], percent=True)}"
+            f" -> live {format_number(always_long['live_hit_rate'], percent=True)}"
+            f"  (z = {format_number(always_long['skill_z'])}"
+            f" over {int(always_long['n_independent_discordant'])} independent horizon(s)"
+            f" of {int(always_long['n_discordant'])} short call(s);"
+            f" naive z = {format_number(always_long['skill_z_naive'])})"
+        )
     pooled = comparisons.get("__all__")
     if pooled:
         claim = format_number(pooled["backtest_directional_accuracy"], percent=True)

@@ -165,15 +165,25 @@ ai-stock journal --data data/prices --journal data/journal/forecasts.csv --out r
 
 1. 用目前所有已標記的 bar 配適模型（必然止於最後一根的前 `horizon` 根），對最新收盤發出預測並附加到日誌；
 2. 掃描日誌，只有「`asof_date + horizon` 那根 bar 已經存在」的列才計分；
-3. 比對 live 命中率與回測宣稱值，並用 **z 值**（差距 ÷ 自身標準誤）說明兩者是否一致。
+3. 比對 live 命中率與回測宣稱值，並用 **z 值**（差距 ÷ 自身標準誤）說明兩者是否一致；
+4. 同時拿同一批列去比「每天單純做多」這個無技巧基準。
 
 ```
-data as of         2026-09-11
-scored / pending   108 / 12
-live hit rate      56.48%
-live IC            0.1824
-vs backtest        claim 50.55% -> live 56.48%  (z = 1.2337)
+data as of         2026-10-02  (1 weekday session(s) missing, under the threshold)
+scored / pending   41 / 16
+live hit rate      53.66%
+live IC            0.4239
+vs always long     always long 60.98% -> live 53.66%  (z = -0.4724 over 3 independent horizon(s) of 11 short call(s); naive z = -0.9045)
+vs backtest        claim 50.00% -> live 53.66%  (z = 0.1465 over 4 independent horizon(s); naive z = 0.4692)
 ```
+
+> **`vs always long` 常常才是那句重話。** 上面這份紀錄命中率 53.66%、高於回測
+> 宣稱的 50.00%，看起來撐住了；但同樣那 41 列，一本每天單純做多的帳戶命中率是
+> 60.98%。模型不是贏了市場，是做多得不夠。兩本帳做多時部位相同、對錯必然相同，
+> 唯一可能分歧的列就是模型做空的列——模型全部的技巧宣稱都押在那 11 筆空單上，
+> 所以 `skill_z` 是只算在那些列上的 McNemar 檢定。P&L 那一對會指向反方向
+> （實盤 +4.6%、一直做多 −2.2%），那正是它在那裡的理由。見
+> `docs/methodology.md` 7e 節。
 
 判讀：**先看 `n_scored`**。少於 30 筆時 z 值不管發生什麼都接近 0，報告會直接說
 「太少，什麼都不能講」。z ≤ −2 才是衰減訊號——回測承諾了 live 交不出來的東西。
