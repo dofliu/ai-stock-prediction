@@ -11,7 +11,7 @@ import pandas as pd
 
 from ai_stock.config import ExperimentConfig
 from ai_stock.evaluation.walkforward import WalkForwardResult
-from ai_stock.journal import ScoreResult
+from ai_stock.journal import ALWAYS_LONG_COLUMNS, ScoreResult
 from ai_stock.pipeline import ModelRun, ScreenResult, SimulationBundle, deflated_sharpe_ratios
 from ai_stock.portfolio import PortfolioResult
 from ai_stock.reporting.report import (
@@ -1140,6 +1140,7 @@ def render_journal_report(
     skipped: list[str] | None = None,
     withheld: list[str] | None = None,
     freshness: pd.DataFrame | None = None,
+    always_long: dict[str, float] | None = None,
 ) -> str:
     """Report what the live forecast journal says, against what was promised.
 
@@ -1149,6 +1150,12 @@ def render_journal_report(
     ``freshness`` is :func:`ai_stock.journal.data_freshness` over the same
     universe. It is rendered above the performance tables, because a stale feed
     makes every number below it describe a day that has already passed.
+
+    ``always_long`` is :func:`ai_stock.journal.compare_with_always_long` over the
+    same result. It is rendered before the backtest comparison on purpose: a
+    reader who stops after one table should have read the one that asks whether
+    the model beat doing nothing, not the one that asks whether it matched a
+    number this project chose for itself.
 
     ``skipped`` and ``withheld`` are both symbols that got no row today, and
     they are listed apart because only one of them is about this project's
@@ -1273,6 +1280,47 @@ def render_journal_report(
             "does.",
         ]
     )
+
+    if always_long:
+        report.heading("Versus always long")
+        report.text(
+            "The same forecasts, scored against a book that was simply long every day. "
+            "A backtest can say whether the model is behaving as promised; only this can "
+            "say whether it beat doing nothing clever, and in a rising market the two come "
+            "apart. Both sides score the identical rows, so the comparison is paired."
+        )
+        report.raw_table(
+            metrics_table(
+                {"live vs always long": always_long},
+                keys=ALWAYS_LONG_COLUMNS,
+                label="quantity",
+            )
+        )
+        report.bullets(
+            [
+                "On a row where the model is long, the two books hold the same position and "
+                "score the same way by construction. Every row they can disagree on is a row "
+                "the model went short, so `n_discordant` is the whole of the evidence and "
+                "`n_short` is its ceiling - the model's claim to skill is its short calls and "
+                "nothing else.",
+                "`skill_z` is McNemar's statistic over exactly those rows: the discordant "
+                "rows the model won, less the ones always-long won, over the square root of "
+                "their total. The rows both books got right carry no information about the "
+                "difference between them, and counting them would only pull the test toward "
+                "zero.",
+                "`skill_z` and `skill_z_naive` bracket it the way `hit_rate_z` and "
+                "`hit_rate_z_naive` do, and for the same reason: consecutive shorts in one "
+                "symbol share most of an outcome window. The naive figure is at the "
+                "discordant-row count, the headline at the non-overlapping block count over "
+                "those same rows. While they disagree, believe the smaller.",
+                "`pnl_gap` is not paired-tested and can point the other way, which is the "
+                "reason it is here: a few large correct shorts against many small wrong ones "
+                "is a real thing for a strategy to be, and a hit rate alone will not show "
+                "it. The benchmark pays no costs - it trades once and holds - while the live "
+                "P&L is net of them. That flatters the benchmark, which is the direction to "
+                "err in when the question is whether the model earned its keep.",
+            ]
+        )
 
     if comparisons:
         report.heading("Live vs. backtest")

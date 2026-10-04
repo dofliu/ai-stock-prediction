@@ -658,3 +658,91 @@ def test_journal_stdout_states_how_current_the_prices_are(tmp_path: Path, capsys
     assert "data as of         2012-09-07" in out
     assert "STALE" in out
     assert "AAA" in out and "BBB" in out
+
+
+def test_journal_reports_the_always_long_benchmark_without_a_backtest(
+    tmp_path: Path, capsys
+) -> None:
+    """`--no-compare` switches off the backtest claim, not the question of skill."""
+    folder = tmp_path / "prices"
+    _write_current_universe(folder)
+    journal = tmp_path / "f.csv"
+    out = tmp_path / "reports"
+
+    # Two runs against the same bars: the first records, the second scores
+    # nothing yet, so the benchmark only has to survive an empty scored frame.
+    for _ in range(2):
+        assert (
+            main(
+                [
+                    "journal",
+                    "--data",
+                    str(folder),
+                    "--model",
+                    "ridge",
+                    "--journal",
+                    str(journal),
+                    "--min-train-rows",
+                    "300",
+                    "--no-compare",
+                    "--out",
+                    str(out),
+                ]
+            )
+            == 0
+        )
+    output = capsys.readouterr().out
+    report = (out / "journal_ridge.md").read_text()
+
+    # Nothing has matured, so there is no benchmark line and no section either.
+    assert "vs always long" not in output
+    assert "Versus always long" not in report
+
+
+def test_journal_states_what_always_long_would_have_scored(tmp_path: Path, capsys) -> None:
+    folder = tmp_path / "prices"
+    _write_current_universe(folder)
+    journal = tmp_path / "f.csv"
+    out = tmp_path / "reports"
+
+    # Hand-written rows with a matured outcome, so the benchmark has something
+    # to score: `score_journal` fills in `realised_return` from the bars.
+    frame = pd.read_csv(folder / "AAA.csv")
+    asof = pd.to_datetime(frame["date"]).iloc[-20]
+    pd.DataFrame(
+        {
+            "asof_date": [asof.date().isoformat()] * 2,
+            "symbol": ["AAA", "BBB"],
+            "model": ["ridge"] * 2,
+            "horizon": [5, 5],
+            "signal": [0.01, -0.01],
+            "position": [1.0, -1.0],
+            "close": [100.0, 100.0],
+        }
+    ).to_csv(journal, index=False)
+
+    assert (
+        main(
+            [
+                "journal",
+                "--data",
+                str(folder),
+                "--model",
+                "ridge",
+                "--journal",
+                str(journal),
+                "--skip-record",
+                "--no-compare",
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    report = (out / "journal_ridge.md").read_text()
+
+    assert "vs always long" in output
+    assert "Versus always long" in report
+    assert "always_long_hit_rate" in report
+    assert "n_discordant" in report
