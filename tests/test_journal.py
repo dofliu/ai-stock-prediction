@@ -1601,3 +1601,88 @@ class TestAlwaysLongBenchmark:
         assert result["pnl_gap"] == pytest.approx(result["live_pnl"] - result["always_long_pnl"])
         # The benchmark pays nothing, so it is the gross sum of the same outcomes.
         assert result["always_long_pnl"] == pytest.approx(live.scored["realised_return"].sum())
+
+    def test_the_pnl_gap_is_quoted_against_its_own_sampling_error(self) -> None:
+        """The gap the hit rate cannot explain is the one that needs a standard error."""
+        # One short that was very right among three that were slightly wrong:
+        # a +34% gap, and a t-statistic that refuses to call it a finding.
+        result = _benchmark([-1.0] * 4, [0.01, 0.01, 0.01, -0.20])
+
+        assert result["pnl_gap"] == pytest.approx(0.34)
+        paired = np.array([-0.02, -0.02, -0.02, 0.40])
+        expected = float(np.mean(paired) / np.std(paired, ddof=1)) * math.sqrt(4.0)
+        assert result["pnl_gap_z_naive"] == pytest.approx(expected)
+        # Four rows, one of which carries the whole gap: nowhere near 2.
+        assert abs(result["pnl_gap_z_naive"]) < 1.5
+
+    def test_the_pnl_bracket_is_cut_on_non_overlapping_windows(self) -> None:
+        """Same arithmetic as the hit-rate pair: the headline is the smaller one."""
+        scored = _long_short_scored([-1.0] * 10, [-0.01] * 10)
+        scored["horizon"] = 5
+        result = compare_with_always_long(
+            ScoreResult(scored=scored, pending=scored.iloc[:0], cost_bps=0)
+        )
+
+        assert result["n_independent_pnl"] == 2.0
+        assert result["pnl_gap_z"] == pytest.approx(
+            result["pnl_gap_z_naive"] * math.sqrt(2.0 / 10.0)
+        )
+        assert abs(result["pnl_gap_z"]) < abs(result["pnl_gap_z_naive"])
+
+    def test_the_sign_follows_the_short_calls(self) -> None:
+        """Only a short row moves the paired difference, and it moves it by twice the return."""
+        good = _benchmark([-1.0] * 4, [-0.01, -0.02, -0.01, -0.02])
+        bad = _benchmark([-1.0] * 4, [0.01, 0.02, 0.01, 0.02])
+
+        assert good["pnl_gap"] == pytest.approx(0.12)
+        assert bad["pnl_gap"] == pytest.approx(-0.12)
+        assert good["pnl_gap_z_naive"] > 0
+        assert bad["pnl_gap_z_naive"] == pytest.approx(-good["pnl_gap_z_naive"])
+
+    def test_identical_shorts_leave_a_real_gap_with_no_spread_to_test_it(self) -> None:
+        """Four shorts that all moved the same way and the same distance: t is undefined."""
+        result = _benchmark([-1.0] * 4, [-0.01] * 4)
+
+        assert result["pnl_gap"] == pytest.approx(0.08)
+        assert result["skill_z_naive"] == pytest.approx(2.0)
+        # Degenerate rather than significant - the gap is real and its standard
+        # error is zero, so there is no t-statistic to quote and none is made up.
+        assert math.isnan(result["pnl_gap_z"])
+        assert math.isnan(result["pnl_gap_z_naive"])
+
+    def test_a_costless_book_that_never_shorts_has_no_gap_to_test(self) -> None:
+        """Every row differs by the same amount - a real difference with no spread."""
+        result = _benchmark([1.0] * 5, [0.01, -0.01, 0.01, 0.01, -0.01])
+
+        assert result["pnl_gap"] == pytest.approx(0.0)
+        assert math.isnan(result["pnl_gap_z"])
+        assert math.isnan(result["pnl_gap_z_naive"])
+
+    def test_the_pnl_block_count_spans_rows_the_hit_rate_never_scored(self) -> None:
+        """A flat row pays to get flat, so it is in the gap even though it is not a trial."""
+        scored = _long_short_scored([0.0, 0.0, -1.0], [0.01, 0.01, -0.01])
+        scored["pnl"] = scored["position"] * scored["realised_return"] - 0.0005
+        result = compare_with_always_long(
+            ScoreResult(scored=scored, pending=scored.iloc[:0], cost_bps=0)
+        )
+
+        assert result["n_decided"] == 1.0
+        assert result["n_independent_discordant"] == 1.0
+        # Three journal dates, one per day, against the one decided row above.
+        assert result["n_independent_pnl"] == 3.0
+        assert result["always_long_pnl"] == pytest.approx(0.01)
+
+    def test_an_empty_journal_reports_a_pnl_block_count_not_a_nan(self) -> None:
+        scored = _long_short_scored([1.0], [0.01]).iloc[:0]
+        result = compare_with_always_long(ScoreResult(scored=scored, pending=scored, cost_bps=0))
+
+        assert result["n_independent_pnl"] == 0.0
+        assert math.isnan(result["pnl_gap_z"])
+
+    def test_a_single_matured_row_has_no_spread_to_divide_by(self) -> None:
+        """One observation is not a sample, and the report says so rather than guessing."""
+        result = _benchmark([-1.0], [-0.01])
+
+        assert result["pnl_gap"] == pytest.approx(0.02)
+        assert math.isnan(result["pnl_gap_z"])
+        assert math.isnan(result["pnl_gap_z_naive"])

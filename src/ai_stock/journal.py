@@ -1064,6 +1064,9 @@ ALWAYS_LONG_COLUMNS = (
     "live_pnl",
     "always_long_pnl",
     "pnl_gap",
+    "n_independent_pnl",
+    "pnl_gap_z",
+    "pnl_gap_z_naive",
 )
 """Keys :func:`compare_with_always_long` returns, in reporting order."""
 
@@ -1102,14 +1105,35 @@ def compare_with_always_long(live: ScoreResult) -> dict[str, float]:
     :func:`independent_blocks` over those rows. Believe the smaller while they
     disagree.
 
-    The P&L pair is not paired-tested and is reported for contrast, because it
-    can point the other way and did: the live book is ``+4.6%`` against
-    always-long's ``-2.2%``, on a hit rate seven points *worse*. A few large
-    correct shorts against many small wrong ones is a real thing for a strategy
-    to be, and a hit rate alone will not show it. The benchmark pays no costs -
-    it trades once and holds - while the live P&L is net of them, which
-    flatters the benchmark; that is the direction to err in when the question
-    is whether the model earned its keep.
+    The P&L pair points the other way and that is the reason it is here: the
+    live book is ``+4.6%`` against always-long's ``-2.2%``, on a hit rate seven
+    points *worse*. A few large correct shorts against many small wrong ones is
+    a real thing for a strategy to be, and a hit rate alone will not show it.
+    The benchmark pays no costs - it trades once and holds - while the live P&L
+    is net of them, which flatters the benchmark; that is the direction to err
+    in when the question is whether the model earned its keep.
+
+    ``pnl_gap`` carries its own sampling error, because a bare ``+6.8%`` beside
+    a losing hit rate is the one number in this report a reader could mistake
+    for evidence, and a gap that size on this few forecasts is exactly what
+    noise looks like. The test is paired on the same rows:
+    ``d = pnl - realised_return``, which on a long row is only that row's cost
+    and on a short row is ``-2 * realised_return`` less that cost. So the short
+    calls carry this statistic too - the same evidence ``skill_z`` reads,
+    weighted by how far each call moved rather than only by which way.
+    ``pnl_gap_z`` is the t-statistic of that mean difference, and brackets with
+    ``pnl_gap_z_naive`` the way every other pair here does: the naive figure at
+    one trial per matured row, the headline at :func:`independent_blocks` over
+    those same rows. Believe the smaller while they disagree.
+
+    Unlike the hit rates, the P&L gap is taken over every matured row rather
+    than the decided ones, because that is what ``live_pnl`` and
+    ``always_long_pnl`` already sum: a flat position still pays to get flat and
+    still differs from a book that stayed long, so it belongs in the
+    difference even though it is not a trial a hit rate can score.
+    ``n_independent_pnl`` is that row set's own block count for the same
+    reason, and is reported rather than left implicit because it is the sample
+    size ``pnl_gap_z`` is computed at.
 
     ``NaN`` where the comparison does not exist rather than a number that
     cannot be read: a journal whose model never went short has nothing to test,
@@ -1135,6 +1159,14 @@ def compare_with_always_long(live: ScoreResult) -> dict[str, float]:
     >>> round(result["skill_z_naive"], 4)
     1.0
 
+    The P&L gap is tested on the same rows, and the bracket stays wide while
+    the journal covers few non-overlapping windows:
+
+    >>> round(result["pnl_gap"], 4), round(result["pnl_gap_z_naive"], 4)
+    (0.06, 1.0)
+    >>> int(result["n_independent_pnl"]), round(result["pnl_gap_z"], 4)
+    (1, 0.5774)
+
     A journal that never went short has nothing to test, and says so:
 
     >>> flat = compare_with_always_long(
@@ -1150,6 +1182,7 @@ def compare_with_always_long(live: ScoreResult) -> dict[str, float]:
         empty["n_short"] = 0.0
         empty["n_discordant"] = 0.0
         empty["n_independent_discordant"] = 0.0
+        empty["n_independent_pnl"] = 0.0
         return empty
 
     position = decided["position"].to_numpy(float)
@@ -1163,8 +1196,25 @@ def compare_with_always_long(live: ScoreResult) -> dict[str, float]:
     discordant = b + c
     n_independent = float(independent_blocks(decided[wins | losses], live.calendar))
 
-    live_pnl = float(live.scored["pnl"].sum()) if "pnl" in live.scored.columns else float("nan")
+    has_pnl = "pnl" in live.scored.columns
+    live_pnl = float(live.scored["pnl"].sum()) if has_pnl else float("nan")
     always_long_pnl = float(live.scored["realised_return"].sum())
+
+    # Paired on the row, so the standard error is of the *difference* and not
+    # of two books measured apart - the market move both of them rode cancels.
+    n_independent_pnl = float(independent_blocks(live.scored, live.calendar))
+    n_rows = len(live.scored)
+    drift = float("nan")
+    if has_pnl and n_rows > 1:
+        realised_all = live.scored["realised_return"].to_numpy(float)
+        paired = live.scored["pnl"].to_numpy(float) - realised_all
+        spread = float(np.std(paired, ddof=1))
+        # A spread of zero is degenerate, not significant: every row differs by
+        # the same amount, which is a book of long calls at a flat cost. The
+        # difference is real and its standard error is zero, so there is no
+        # t-statistic to quote and none is invented.
+        if spread > 0.0:
+            drift = float(np.mean(paired)) / spread
 
     gap_rate = (b - c) / discordant if discordant > 0 else float("nan")
     return {
@@ -1182,6 +1232,9 @@ def compare_with_always_long(live: ScoreResult) -> dict[str, float]:
         "live_pnl": live_pnl,
         "always_long_pnl": always_long_pnl,
         "pnl_gap": live_pnl - always_long_pnl,
+        "n_independent_pnl": n_independent_pnl,
+        "pnl_gap_z": drift * math.sqrt(n_independent_pnl),
+        "pnl_gap_z_naive": drift * math.sqrt(n_rows),
     }
 
 
