@@ -24,6 +24,50 @@ empty queue is a real answer, and a day that pushes nothing is a fine outcome.
 
 ## Done
 
+- [x] **Quote the P&L gap against its own sampling error** (`pnl_gap_z`,
+  `pnl_gap_z_naive`, `n_independent_pnl`, 2026-10-05). The gap the 2026-10-04
+  item named in its own "what this does not fix": the always-long comparison
+  landed with the P&L pair as a raw difference and no sampling error attached.
+
+  That is the one number in the report a reader could mistake for evidence.
+  Everything else in the section says the model is behind: a hit rate seven
+  points under always-long, `skill_z` of -0.47 on 11 short calls. Beside them
+  sat `+4.6%` against `-2.2%` - a `+6.8%` advantage with nothing to say whether
+  it was skill or one lucky short. On today's journal it is **`pnl_gap_z` =
+  0.07**, naive 0.21. It is noise, and now it says so.
+
+  The test is paired on the row, like the hit-rate one and for the same reason:
+  `d = pnl - realised_return`, which is only the row's cost on a long row and
+  `-2 x realised_return` less that cost on a short one. The market leg both
+  books rode cancels before anything is measured, so this reads the same
+  evidence `skill_z` does - the short calls - weighted by how far each call
+  moved rather than only by which way it went. That is what makes it worth
+  having next to `skill_z` rather than a second opinion on the same statistic:
+  one large correct short against many small wrong ones scores badly on
+  McNemar's and well here, which is precisely the case the P&L pair was added
+  to expose.
+
+  `pnl_gap_z` and `pnl_gap_z_naive` bracket it the way every other pair in this
+  module does - the naive figure at one trial per matured row, the headline at
+  `independent_blocks` over the same rows - and the honest reading lies between
+  them. Both are taken over every matured row rather than only the decided
+  ones, because that is the row set `live_pnl` and `always_long_pnl` already
+  sum: a flat position still pays to get flat and still differs from a book
+  that stayed long, even though it is not a trial a hit rate can score.
+  `n_independent_pnl` is that row set's own block count, reported rather than
+  left implicit because it is the sample size `pnl_gap_z` is computed at.
+
+  A spread of zero returns `NaN` rather than an infinity: every row differing
+  by the same amount is a book of long calls at a flat cost, where the
+  difference is real and its standard error is zero. Degenerate, not
+  significant.
+
+  What this does not fix: the statistic assumes the paired differences are
+  identically distributed across rows, which a journal spanning two exchanges
+  and one position size does not quite honour, and the block count is still the
+  conservative treatment of overlap rather than a measured one. Neither matters
+  at a `z` of 0.07; both would at a `z` near 2.
+
 - [x] **Score the journal against always-long, the benchmark a backtest cannot
   supply** (`compare_with_always_long`, 2026-10-04). A gap found while reading
   the day's journal report, not from the queue - the queue was empty.

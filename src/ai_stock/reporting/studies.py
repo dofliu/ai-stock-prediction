@@ -1313,12 +1313,25 @@ def render_journal_report(
                 "symbol share most of an outcome window. The naive figure is at the "
                 "discordant-row count, the headline at the non-overlapping block count over "
                 "those same rows. While they disagree, believe the smaller.",
-                "`pnl_gap` is not paired-tested and can point the other way, which is the "
-                "reason it is here: a few large correct shorts against many small wrong ones "
-                "is a real thing for a strategy to be, and a hit rate alone will not show "
-                "it. The benchmark pays no costs - it trades once and holds - while the live "
-                "P&L is net of them. That flatters the benchmark, which is the direction to "
-                "err in when the question is whether the model earned its keep.",
+                "`pnl_gap` can point the other way, which is the reason it is here: a few "
+                "large correct shorts against many small wrong ones is a real thing for a "
+                "strategy to be, and a hit rate alone will not show it. The benchmark pays "
+                "no costs - it trades once and holds - while the live P&L is net of them. "
+                "That flatters the benchmark, which is the direction to err in when the "
+                "question is whether the model earned its keep.",
+                "`pnl_gap_z` is that gap in units of its own sampling error, because a gap "
+                "beside a losing hit rate is the one number here a reader could mistake for "
+                "evidence. It is paired on the row - `pnl` less `realised_return`, which is "
+                "only the cost on a long row and twice the move against it on a short one - "
+                "so the market leg both books rode cancels before anything is measured, and "
+                "the short calls carry this statistic the way they carry `skill_z`, weighted "
+                "by how far each one moved rather than only by which way.",
+                "`pnl_gap_z` and `pnl_gap_z_naive` bracket it as every other pair here does: "
+                "the naive figure at one trial per matured row, the headline at "
+                "`n_independent_pnl` non-overlapping windows over those same rows. Believe "
+                "the smaller while they disagree. Both are taken over every matured row, not "
+                "only the decided ones, because that is the row set the two P&L figures "
+                "above already sum.",
             ]
         )
 
