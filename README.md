@@ -10,6 +10,11 @@
 
 > ⚠️ 本專案為教學與研究工具，**不構成任何投資建議**。
 
+**最新測試執行報告：[`docs/reports/2026-10-06`](docs/reports/2026-10-06/README.md)**
+——測試關卡、框架驗證、模型比較、真實資料篩選與預測日誌，附圖表、截圖與統計表。
+一句話版本：框架抓得到植入的邊際、也不會無中生有；但在真實的四檔記憶體股上，
+模型**全數輸給買進持有**，實盤日誌也還短到不能下任何結論。
+
 ---
 
 ## 核心設計
@@ -53,6 +58,8 @@ pip install -e ".[dev]"
 ```
 
 只需要 `numpy`、`pandas`、`scikit-learn`；圖表以 ASCII 繪製，不需要 matplotlib。
+（唯一的例外是 `scripts/make_report_figures.py`：它把 CLI 已經算好的數字畫成報告用的 PNG，
+需要另外 `pip install matplotlib`。套件本身不依賴它。）
 
 ### 送出修改前：`make check`
 
@@ -60,9 +67,10 @@ pip install -e ".[dev]"
 make check    # lint + test + doctest + smoke，約 40 秒
 ```
 
-這一條跑的是 `.github/workflows/ci.yml` 的完整內容、同樣順序。**CI 目前因為
-Actions 額度用盡而無法執行**，所以在額度恢復之前，這是一個修改與 `main`
-之間唯一的關卡——請在 push 前跑過，並把結果寫進 PR。
+這一條跑的是 `.github/workflows/ci.yml` 的完整內容、同樣順序。GitHub Actions
+有**每月額度**，用盡時 CI 會整個無法啟動（2026-09 曾停擺十天），那段期間這就是
+一個修改與 `main` 之間唯一的關卡。所以不管 CI 當下能不能跑，都請在 push 前跑過，
+並把結果寫進 PR。
 
 | 關卡 | 內容 |
 |---|---|
@@ -169,31 +177,40 @@ ai-stock journal --data data/prices --journal data/journal/forecasts.csv --out r
 4. 同時拿同一批列去比「每天單純做多」這個無技巧基準。
 
 ```
-data as of         2026-10-02  (1 weekday session(s) missing, under the threshold)
-scored / pending   41 / 16
-live hit rate      53.66%
-live IC            0.4239
-vs always long     always long 60.98% -> live 53.66%  (z = -0.4724 over 3 independent horizon(s) of 11 short call(s); naive z = -0.9045)
-vs backtest        claim 50.00% -> live 53.66%  (z = 0.1465 over 4 independent horizon(s); naive z = 0.4692)
+data as of         2026-10-05
+scored / pending   45 / 16
+live hit rate      51.11%
+live IC            0.3377
+total P&L          -8.91%
+vs always long     always long 64.44% -> live 51.11%  (z = -0.7423 over 3 independent horizon(s) of 14 short call(s); naive z = -1.6036)
+vs backtest        claim 49.91% -> live 51.11%  (z = 0.0480 over 4 independent horizon(s); naive z = 0.1610)
 ```
 
-> **`vs always long` 常常才是那句重話。** 上面這份紀錄命中率 53.66%、高於回測
-> 宣稱的 50.00%，看起來撐住了；但同樣那 41 列，一本每天單純做多的帳戶命中率是
-> 60.98%。模型不是贏了市場，是做多得不夠。兩本帳做多時部位相同、對錯必然相同，
-> 唯一可能分歧的列就是模型做空的列——模型全部的技巧宣稱都押在那 11 筆空單上，
-> 所以 `skill_z` 是只算在那些列上的 McNemar 檢定。P&L 那一對會指向反方向
-> （實盤 +4.6%、一直做多 −2.2%），那正是它在那裡的理由。見
-> `docs/methodology.md` 7e 節。
+（2026-10-06 的輸出；完整報告見 [`docs/reports/2026-10-06`](docs/reports/2026-10-06/README.md)。）
+
+> **`vs always long` 常常才是那句重話。** 上面這份紀錄命中率 51.11%、和回測
+> 宣稱的 49.91% 一致，看起來撐住了；但同樣那 45 列，一本每天單純做多的帳戶命中率
+> 是 64.44%。模型不是贏了市場，是做多得不夠。兩本帳做多時部位相同、對錯必然相同，
+> 唯一可能分歧的列就是模型做空的列——模型全部的技巧宣稱都押在那 14 筆空單上
+> （對了 4 筆），所以 `skill_z` 是只算在那些列上的 McNemar 檢定。
+>
+> P&L 那一對（`pnl_gap`）附有自己的標準誤 `pnl_gap_z`，因為它最容易被誤讀：
+> 2026-10-05 它是 **+6.8%**（看起來模型贏了一直做多），`pnl_gap_z` = 0.07；
+> 隔天同一天三張台股空單一起到期、一起錯，它變成 **−22.0%**。一天翻號的數字，
+> 就是標準誤早就說了的那種雜訊。見 `docs/methodology.md` 7e 節。
 
 判讀：**先看 `n_scored`**。少於 30 筆時 z 值不管發生什麼都接近 0，報告會直接說
 「太少，什麼都不能講」。z ≤ −2 才是衰減訊號——回測承諾了 live 交不出來的東西。
 
 > **再看 `data as of`。** 行情源停掉時，這份報告不會變安靜，它會有自信地重複：
-> 同一批預測對同一批 bar 到期，命中率一字不差地再報一次。任何標的落後超過
-> 四個日曆天，這一行會標成 `STALE` 並點名，報告也會在所有績效數字之前說明。
-> 判斷標準是日曆天而非交易日，所以長假會被誤報為落後——這是刻意選的方向：
-> 多看一眼下載器幾乎沒有成本，一個悄悄停止更新的命中率則毀掉唯一無法事後
-> 調整的數字。細節見 `docs/methodology.md` 7d 節。
+> 同一批預測對同一批 bar 到期，命中率一字不差地再報一次。判斷看的是**錯過了幾場
+> 平日收盤**（`sessions missed`），不是日曆天——週一讀到週五的 bar 是 3 天但一場
+> 都沒缺，週三讀到週一的 bar 也是 3 天卻缺了兩場。缺 1 場是供應商的正常延遲，
+> 這一行會明講但不示警；缺 2 場以上就標成 `STALE` 並點名，並在所有績效數字之前說明。
+> 不查假日表，所以長假會被誤報為落後——這是刻意選的方向：多看一眼下載器幾乎
+> 沒有成本，一個悄悄停止更新的命中率則毀掉唯一無法事後調整的數字。
+> （`--fail-if-stale` 讓 workflow 變紅的那個出口另外數日曆天，門檻 10 天，以免
+> 每年農曆年誤鳴。）細節見 `docs/methodology.md` 7d 節。
 
 > `live_ic` 取各標的 IC 的平均，而非把所有標的丟進同一個相關係數
 > （後者列為 `live_ic_pooled` 僅供對照）。理由與 `ic_fold_mean` 相同：
@@ -260,8 +277,11 @@ ai-stock simulate --model ridge --days 3000 --efficient    # 無邊際（純雜�
 
 | 市場 | 實現 Sharpe | 排列檢定 p 值 | 結論 |
 |---|---|---|---|
-| 植入邊際（`ar1=0.06, reversion=-0.05`） | **0.56** | **0.020** | 成功還原已知訊號 |
-| 效率市場（`--efficient`） | −0.05 | 0.478 | 未產生偽陽性 |
+| 植入邊際（`ar1=0.06, reversion=-0.05`） | **0.56** | **0.018** | 成功還原已知訊號 |
+| 效率市場（`--efficient`） | −0.05 | 0.441 | 未產生偽陽性 |
+
+（2026-10-06 重跑，循環位移虛無 500 次；兩組虛無分布的圖見
+[測試報告圖 1](docs/reports/2026-10-06/README.md#2-框架驗證它會不會無中生有)。）
 
 此外，用 OLS 對合成資料回歸可還原出資料生成過程的真實係數
 （隱含落後係數 `r_{t-3..t-5} ≈ −0.05`，與設定值一致），
@@ -295,6 +315,16 @@ src/ai_stock/
 ├── backtest/engine.py   # 訊號→部位→權益曲線（含成本、波動目標）
 ├── simulation/          # 路徑模擬、bootstrap 區間、排列檢定
 └── reporting/           # Markdown 報告與 ASCII 圖表
+
+scripts/
+├── fetch_prices.py          # GitHub Actions 每日抓價（yfinance）
+├── daily_update.py          # Actions 停擺時，在本機跑同一個每日迴圈
+└── make_report_figures.py   # 把 CLI 輸出畫成報告用 PNG（選用 matplotlib）
+
+docs/
+├── methodology.md       # 每個統計設計背後的理由
+├── roadmap.md           # 工作佇列、已完成項目與拒絕理由
+└── reports/<date>/      # 測試執行報告（圖表、截圖、統計表）
 ```
 
 ---

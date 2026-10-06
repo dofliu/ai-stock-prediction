@@ -24,6 +24,44 @@ empty queue is a real answer, and a day that pushes nothing is a fine outcome.
 
 ## Done
 
+- [x] **Refresh the docs and publish a test-run report** (`docs/reports/2026-10-06/`,
+  `scripts/make_report_figures.py`, 2026-10-06). Asked for directly, not taken
+  from the queue.
+
+  Four statements in the docs had drifted from the code they describe, and each
+  was the kind a reader acts on:
+
+  - `methodology.md` 7e still said the P&L pair "is not paired-tested" - true
+    until PR #39 the day before, false since. Rewritten around `pnl_gap_z`, with
+    the next day's journal as the worked example: `pnl_gap` went from +6.8%
+    (`pnl_gap_z` = 0.07) to -22.0% in one day, when three Taiwan shorts recorded
+    on the same day matured together and were wrong together.
+  - The README said the freshness verdict counts calendar days. It has counted
+    missed weekday sessions since 7d was written; only `--fail-if-stale` still
+    counts calendar days, and now the README says which is which.
+  - The README said CI "cannot run" for lack of Actions quota. It ran green on
+    PR #39. Rephrased as what is actually true: quota is monthly, and when it
+    runs out `make check` is the only gate - which is why it is run either way.
+  - The synthetic-market validation table quoted p = 0.020 and 0.478. A rerun
+    gives 0.018 and 0.441 (the planted-edge Sharpe, 0.56, and the rotation
+    null's 95th percentile, 0.40, are unchanged). The conclusion stands; the
+    numbers now match what the code prints.
+
+  The report runs the full `make check` gate and four experiments - framework
+  validation, model comparison, the real-universe screen, the journal - and
+  shows each through the CLI's own output, a chart, and a table. Its figures
+  come from `scripts/make_report_figures.py`, which computes nothing the CLI
+  does not: it reads the CSVs the commands wrote, and the one figure that needs
+  more (the rotation nulls) recomputes them through `run_simulation` and prints
+  p-values that match the CLI's to four places. It is the one file in the repo
+  that imports matplotlib, lazily, so the package's dependency list is
+  unchanged; the README says so where it says matplotlib is not needed.
+
+  The report states what the run cannot: the journal covers four independent
+  horizons, so nothing in section 5 is a finding. It reads `forecasts.csv` only
+  through the journal command's `--skip-record` export and writes nothing under
+  `data/`.
+
 - [x] **Quote the P&L gap against its own sampling error** (`pnl_gap_z`,
   `pnl_gap_z_naive`, `n_independent_pnl`, 2026-10-05). The gap the 2026-10-04
   item named in its own "what this does not fix": the always-long comparison
