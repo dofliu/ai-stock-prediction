@@ -35,7 +35,8 @@ def test_clean_keeps_the_forecast_journal_and_prices(tmp_path: Path) -> None:
     shutil.copy(MAKEFILE, tmp_path / "Makefile")
     journal = tmp_path / "data" / "journal" / "forecasts.csv"
     prices = tmp_path / "data" / "prices" / "MU.csv"
-    for path in (journal, prices):
+    notes = tmp_path / "data" / "notes" / "industry.csv"
+    for path in (journal, prices, notes):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("asof_date,symbol\n", encoding="utf-8")
 
@@ -57,6 +58,7 @@ def test_clean_keeps_the_forecast_journal_and_prices(tmp_path: Path) -> None:
     assert journal.exists(), "make clean deleted the forecast journal"
     assert journal.read_text(encoding="utf-8") == "asof_date,symbol\n"
     assert prices.exists(), "make clean deleted the price history"
+    assert notes.exists(), "make clean deleted the hand-kept industry notes"
     for path in disposable:
         assert not path.exists(), f"make clean left {path.name} behind"
 
