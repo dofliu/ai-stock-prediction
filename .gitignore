@@ -26,3 +26,7 @@ htmlcov/
 # and the journal is the one score that cannot be recomputed after the fact.
 !/data/prices/
 !/data/journal/
+# The daily watch reports, and the industry notes kept by hand: a note is
+# dated when it is written, so like the journal it cannot be redone later.
+!/data/watch/
+!/data/notes/
