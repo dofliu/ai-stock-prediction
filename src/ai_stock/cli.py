@@ -63,6 +63,15 @@ from ai_stock.reporting.studies import (
     render_screen_report,
     render_simulation_report,
 )
+from ai_stock.watch import (
+    load_notes,
+    market_of,
+    note_followups,
+    overnight_links,
+    read_symbol_names,
+    render_watch_report,
+    snapshot,
+)
 
 __all__ = ["build_parser", "main"]
 
@@ -342,6 +351,29 @@ def build_parser() -> argparse.ArgumentParser:
         _output_options,
     ):
         add_options(journal)
+
+    watch = subparsers.add_parser(
+        "watch", help="write the daily market-watch report: what happened, no forecasts"
+    )
+    watch.add_argument(
+        "--data", type=Path, default=Path("data/prices"), help="directory of OHLCV CSV files"
+    )
+    watch.add_argument(
+        "--universe",
+        type=Path,
+        default=Path("config/universe.txt"),
+        help="ticker list whose comments supply display names",
+    )
+    watch.add_argument(
+        "--notes",
+        type=Path,
+        default=Path("data/notes/industry.csv"),
+        help="hand-kept industry notes log (date,symbols,category,note)",
+    )
+    watch.add_argument(
+        "--out", type=Path, default=None, help="directory for watch_<date>.md and latest.md"
+    )
+    watch.add_argument("--quiet", action="store_true", help="suppress the stdout report")
 
     subparsers.add_parser("models", help="list the available model names")
     return parser
@@ -867,6 +899,34 @@ def _command_journal(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_watch(args: argparse.Namespace) -> int:
+    universe = load_universe(data_paths=[args.data])
+    if not universe:
+        raise ValueError(f"no CSV files found in {args.data}")
+    names = read_symbol_names(args.universe)
+    # Universe order first, so the report keeps the order the config file chose.
+    order = [s for s in names if s in universe] + sorted(s for s in universe if s not in names)
+    snapshots = [snapshot(universe[s], s) for s in order]
+
+    links = []
+    for follower in (s for s in order if market_of(s) == "TW"):
+        for leader in (s for s in order if market_of(s) == "US"):
+            link = overnight_links(
+                universe[leader], universe[follower], leader_name=leader, follower_name=follower
+            )
+            if link is not None:
+                links.append(link)
+
+    followups = note_followups(load_notes(args.notes), universe)
+    report = render_watch_report(snapshots, names=names, links=links, followups=followups)
+    if args.out:
+        as_of = max(s.date for s in snapshots)
+        _write(args.out / f"watch_{as_of:%Y-%m-%d}.md", report)
+        _write(args.out / "latest.md", report)
+    _echo(report, quiet=args.quiet)
+    return 0
+
+
 def _command_models(args: argparse.Namespace) -> int:
     del args
     print("\n".join(available_models()))
@@ -880,6 +940,7 @@ _COMMANDS = {
     "simulate": _command_simulate,
     "screen": _command_screen,
     "journal": _command_journal,
+    "watch": _command_watch,
     "models": _command_models,
 }
 

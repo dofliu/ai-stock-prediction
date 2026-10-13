@@ -2,7 +2,7 @@
 # One ticker per line, in Yahoo Finance notation. `#` starts a comment.
 
 # Memory / DRAM / NAND
-MU          # Micron Technology
+MU          # 美光 Micron Technology
 2408.TW     # 南亞科 Nanya Technology
 2344.TW     # 華邦電 Winbond
 2337.TW     # 旺宏 Macronix

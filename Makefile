@@ -21,7 +21,7 @@ help:
 	@echo "doctest  執行 src/ai_stock 的 doctest"
 	@echo "smoke    CLI 端到端冒煙測試（寫入暫存目錄，不動到 repo）"
 	@echo "demo     產生合成資料並跑完整模型比較報告"
-	@echo "clean    清除快取與輸出（不會碰 data/prices 與 data/journal）"
+	@echo "clean    清除快取與輸出（不會碰 data/prices、journal、watch、notes）"
 
 install:
 	$(PY) -m pip install -e ".[dev]"
@@ -59,6 +59,9 @@ smoke:
 	cp "$$tmp/ci.csv" "$$tmp/universe/AAA.csv"; \
 	$(PY) -m ai_stock screen --data "$$tmp/universe" --model ridge --permutations 20 \
 		--train-size 400 --test-size 100 --out "$$tmp/reports" --quiet; \
+	$(PY) -m ai_stock watch --data "$$tmp/universe" --notes "$$tmp/no-notes.csv" \
+		--out "$$tmp/watch" --quiet; \
+	test -s "$$tmp/watch/latest.md"; \
 	test -s "$$tmp/reports/comparison.md"; \
 	test -s "$$tmp/reports/simulation_ridge.md"; \
 	test -s "$$tmp/reports/screen_ridge.md"; \
@@ -77,8 +80,9 @@ demo:
 # is the one record in this project that cannot be regenerated: every row was
 # written before its outcome existed, so re-recording a lost day would use a
 # model fitted on more data than the original ever saw. The paths kept below
-# are exactly the two .gitignore un-ignores for the same reason.
+# are exactly the ones .gitignore un-ignores, for the same reason: data/notes
+# is written by hand and dated when written, so it cannot be recreated either.
 clean:
 	rm -rf .pytest_cache .ruff_cache reports
-	find data -mindepth 1 -maxdepth 1 ! -name prices ! -name journal -exec rm -rf {} + 2>/dev/null || true
+	find data -mindepth 1 -maxdepth 1 ! -name prices ! -name journal ! -name watch ! -name notes -exec rm -rf {} + 2>/dev/null || true
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +

@@ -7,14 +7,41 @@ build.
 
 Keep each item small enough to land in one reviewed pull request.
 
+## Direction (2026-10-09)
+
+The research question is answered: on these four memory stocks, five-day
+forecasts from price history do not beat buy-and-hold after costs (fold IC
+within noise, every `excess_sharpe` negative, no `q_value` under 0.4). The
+statistics around the journal are now finer than its sample can use - five
+independent windows - so further work on them is polish, not evidence.
+
+The project is now a **daily market-watch tool** (`ai-stock watch`): it
+describes what happened, each figure against the stock's own history, and
+keeps a hand-written industry-notes log beside the prices that followed each
+note. The forecast journal keeps recording untouched in the background; it is
+free, and in six months it will have enough independent windows to say
+something.
+
+The longer aim is to find out, from notes written *before* their outcomes,
+whether any kind of industry news is followed by a price response the overnight
+US move does not already explain. That needs months of notes first.
+
 ## Now
 
-Nothing queued. The daily routine adds an item here when it finds a gap.
+Nothing queued. Notes need to accumulate before the next step is worth
+building; a day that pushes nothing is a fine outcome.
 
 ## Next
 
-Nothing queued. The daily routine adds an item here when it finds a gap; an
-empty queue is a real answer, and a day that pushes nothing is a fine outcome.
+- [ ] **Group the notes by category once there are enough of them.** When the
+  log holds roughly 30+ notes across a few categories, report each category's
+  average follow-up return *in excess of the same stock's overnight-implied
+  move and of the sector's other names*, with its sampling error. Before that
+  point it is anecdotes, and the report should say so rather than average them.
+- [ ] **Sector context in the watch report.** A memory stock's day means more
+  beside the Philadelphia Semiconductor Index (`^SOX`) and the TAIEX (`^TWII`).
+  Needs the two added to `config/universe.txt` and kept out of the forecast
+  journal, which should stay on the four stocks it has always scored.
 
 ## Later
 
@@ -23,6 +50,19 @@ empty queue is a real answer, and a day that pushes nothing is a fine outcome.
   always possible, which it is not - especially for Taiwan small caps.
 
 ## Done
+
+- [x] **Daily market-watch report** (`ai-stock watch`, `data/watch/`,
+  `data/notes/industry.csv`, 2026-10-09). The pivot described under
+  *Direction*. Each session is described against the stock's own history -
+  a move in units of its prior 60-day standard deviation, how many sessions in
+  the prior year moved as much, volume against the prior 20-day average,
+  20-day volatility as a percentile of the last three years - with the
+  baselines stopping the bar before today, so today never inflates the yard
+  stick it is measured by. The overnight table pairs each Taiwan open with the
+  US session that closed before it; the slope it reports an "expected gap"
+  from is fitted on the year before the session it explains. Notes are
+  followed from the last close their writer could see, and a window that has
+  not elapsed is shown as missing rather than as a partial answer.
 
 - [x] **Quote the P&L gap against its own sampling error** (`pnl_gap_z`,
   `pnl_gap_z_naive`, `n_independent_pnl`, 2026-10-05). The gap the 2026-10-04
