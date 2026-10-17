@@ -248,6 +248,8 @@ vs backtest        claim 50.00% -> live 53.66%  (z = 0.1465 over 4 independent h
 `.github/workflows/daily-prices.yml` 每個交易日 22:00 UTC（美股收盤後，
 同日台股也已收盤）用 runner 的網路抓 `config/universe.txt` 列出的標的，
 記錄預測、計分到期項，然後把 `data/prices/` 與 `data/journal/` commit 回 repo。
+另有一次 02:00 UTC 的補抓：Yahoo 要到約 01:30 UTC 才填上美股當日價格，
+排程若提早落地，MU 就會落後一個交易日而無法記入日誌，這次補抓專門補上 MU。
 單一 ticker 失敗不影響其他標的；全部失敗才視為異常並讓 job 失敗。
 
 抓價是唯一無法離線測試的路徑，所以只要動到相關檔案，同一個 workflow

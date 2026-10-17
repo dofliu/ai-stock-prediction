@@ -51,6 +51,34 @@ building; a day that pushes nothing is a fine outcome.
 
 ## Done
 
+- [x] **Catch MU with a second, later daily run** (`daily-prices.yml`,
+  2026-10-17). A defect found while checking the day's run, not from the
+  queue - the queue was empty.
+
+  `MU` has no row in `data/journal/forecasts.csv` after `2026-10-12`, while
+  every run since was green. The 2026-10-03 item made that cost visible and
+  called it the honest answer for "a symbol whose feed cannot beat the next
+  session", and the 2026-10-02 item said `MU` "runs a day behind regardless".
+  The commit history says otherwise: the lag is a matter of *when* the job
+  runs. Yahoo lists a US session's date at the close but leaves its prices
+  blank for hours. Of the runs from 2026-09-23 to 2026-10-17, all eleven that
+  committed before 01:16 UTC had `MU` one session behind, the two between
+  01:16 and 01:25 split, and all six from 01:34 on had it current. The
+  scheduler's drift has shrunk from three hours to two, so the 22:00 cron now
+  lands around 00:10 - inside the blank window every day.
+
+  Moving the one cron later would trade `MU` for the Taiwan names, whose
+  same-day bar exists only after 05:30 UTC. So the 22:00 run stays and a
+  `0 2 * * 2-6` run is added: by 02:00 the US bar is in, the next New York
+  close is hours away, Taipei's in-progress bar is still dropped, and
+  `append_forecasts` ignores every row the first run already wrote. Nothing
+  is withheld that was not already, and no recorded row changes.
+
+  What this does not fix: the four missing `MU` dates cannot be backfilled - a
+  forecast written now for 2026-10-13 would be written after its outcome. And
+  01:30 is an observation from nineteen runs, not a published SLA; if Yahoo's
+  delay grows, `Symbols withheld: MU` in the report is still where it shows.
+
 - [x] **Daily market-watch report** (`ai-stock watch`, `data/watch/`,
   `data/notes/industry.csv`, 2026-10-09). The pivot described under
   *Direction*. Each session is described against the stock's own history -
