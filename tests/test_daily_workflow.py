@@ -87,3 +87,24 @@ def test_the_journal_step_cannot_abort_the_commit(workflow: str) -> None:
 def test_both_alarms_read_an_outcome_rather_than_failing_in_place(workflow: str) -> None:
     assert "if: steps.fetch.outcome == 'failure'" in workflow
     assert "if: steps.journal.outcome == 'failure'" in workflow
+
+
+def _cron_hours(workflow: str) -> list[int]:
+    lines = [ln.strip() for ln in workflow.splitlines() if ln.strip().startswith("- cron:")]
+    return [int(ln.split('"')[1].split()[1]) for ln in lines]
+
+
+def test_a_run_lands_after_both_closes(workflow: str) -> None:
+    """22:00 UTC: New York has closed (20:00-21:00) and so has Taipei (05:30)."""
+    assert 22 in _cron_hours(workflow)
+
+
+def test_a_catch_up_run_lands_after_the_us_bar_is_published(workflow: str) -> None:
+    """Without it MU records nothing whenever the main run lands early.
+
+    Yahoo leaves a US session's prices blank until roughly 01:30 UTC, so a run
+    before that sees MU one session behind and the journal withholds it. The
+    catch-up hour must sit after that and before the 05:30 UTC Taipei close,
+    with room for the scheduler's drift.
+    """
+    assert any(2 <= hour <= 3 for hour in _cron_hours(workflow))

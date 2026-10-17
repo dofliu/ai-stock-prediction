@@ -10,9 +10,22 @@ name: Daily prices and forecast journal
 # the next Taipei session (01:00-05:30 UTC). So the download drops any bar for
 # a market still trading rather than trusting this line - see
 # `drop_unclosed_session` in src/ai_stock/data/loaders.py.
+#
+# The second line is a catch-up run for MU, and the first one cannot replace
+# it. Yahoo lists a US session's date at the close but leaves its prices blank
+# for hours, and `drop_untraded_rows` rightly discards the blank row. Of the
+# runs from 2026-09-23 to 2026-10-17, all eleven that committed before 01:16
+# UTC got MU one session behind, both outcomes occurred between 01:16 and
+# 01:25, and all six from 01:34 on got it current. One session behind is one
+# session too late for the journal, which withholds a forecast whose outcome
+# window has opened - so from 2026-10-13 MU recorded nothing at all while
+# every run was green. At 02:00 UTC plus drift the US bar is in, the next New York close
+# is hours away and Taipei's in-progress bar is still dropped, so this run
+# records MU and re-records nothing: the journal ignores a row it already has.
 on:
   schedule:
     - cron: "0 22 * * 1-5"
+    - cron: "0 2 * * 2-6"
   workflow_dispatch:
     inputs:
       period:
